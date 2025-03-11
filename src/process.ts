@@ -2,6 +2,7 @@ import {getFilesWithCoverage} from './util'
 import {ChangedFile} from './models/github'
 import {Coverage, File, Line, Module, Project} from './models/project'
 import {Counter, Group, Package, Report} from './models/jacoco-types'
+import * as core from '@actions/core'
 
 export function getProjectCoverage(
   reports: Report[],
@@ -92,12 +93,57 @@ function getFileCoverageFromPackages(
 ): File[] {
   const resultFiles: File[] = []
   const jacocoFiles = getFilesWithCoverage(packages)
+  
   for (const jacocoFile of jacocoFiles) {
     const name = jacocoFile.name
     const packageName = jacocoFile.packageName
-    const githubFile = files.find(function (f) {
-      return f.filePath.endsWith(`${packageName}/${name}`)
+    core.info(`Attempting to match JaCoCo file: ${packageName}/${name}`)
+    files.forEach(f => {
+      const endsWith = f.filePath.endsWith(`${packageName}/${name}`)
+      core.info(`Comparing with ${f.filePath}:`)
+      core.info(`- Path ends with "${packageName}/${name}": ${endsWith}`)
+      
+      // Test alternative matching approaches
+      const endsWithName = f.filePath.endsWith(`/${name}`)
+      core.info(`- Path ends with "/${name}": ${endsWithName}`)
+      
+      const packagePath = packageName.replace(/\./g, '/');
+      const includesPackagePath = f.filePath.includes(packagePath) && f.filePath.endsWith(name)
+      core.info(`- Includes package path "${packagePath}" and ends with "${name}": ${includesPackagePath}`)
+      
+      const className = packageName.split(/[./]/).pop();
+      const includesClassName = className && f.filePath.includes(className) && f.filePath.endsWith(name)
+      core.info(`- Includes class name "${className}" and ends with "${name}": ${includesClassName}`)
     })
+    // More flexible matching logic
+    const githubFile = files.find(function (f) {
+      // Original matching logic
+      if (f.filePath.endsWith(`${packageName}/${name}`)) {
+        return true;
+      }
+      
+      // Additional matching for just the filename
+      // This will match files regardless of package structure
+      if (f.filePath.endsWith(`/${name}`)) {
+        return true;
+      }
+      
+      // Handle package path conversion for Kotlin files
+      // Convert package dots to slashes for comparison
+      const packagePath = packageName.replace(/\./g, '/');
+      if (f.filePath.includes(packagePath) && f.filePath.endsWith(name)) {
+        return true;
+      }
+      
+      // For Kotlin Multiplatform, check if the class name part matches
+      // Extract the class name from package name (last part after dot/slash)
+      const className = packageName.split(/[./]/).pop();
+      if (className && f.filePath.includes(className) && f.filePath.endsWith(name)) {
+        return true;
+      }
+      
+      return false;
+    });
     if (githubFile) {
       const instruction = jacocoFile.counters.find(
         counter => counter.name === 'instruction'
