@@ -207,15 +207,15 @@ async function getChangedFiles(
   client: InstanceType<typeof GitHub>,
   debugMode: boolean
 ): Promise<ChangedFile[]> {
-  const response = await client.rest.repos.compareCommits({
-    base,
-    head,
+  const prNumber = github.context.payload.pull_request?.number;
+  const response = await client.rest.pulls.listFiles({
     owner: github.context.repo.owner,
     repo: github.context.repo.repo,
-  })
+    pull_number: prNumber,
+  });
 
   const changedFiles: ChangedFile[] = []
-  const files = response.data.files ?? []
+  const files = response.data ?? []
   for (const file of files) {
     if (debugMode) core.info(`file: ${debug(file)}`)
     const changedFile: ChangedFile = {
