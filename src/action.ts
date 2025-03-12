@@ -109,7 +109,6 @@ export async function action(): Promise<void> {
 
     core.info(`base sha: ${base}`)
     core.info(`head sha: ${head}`)
-    if (debugMode) core.info(`context: ${debug(github.context)}`)
     if (debugMode) core.info(`reportPaths: ${reportPaths}`)
 
     const changedFiles = await getChangedFiles(base, head, client, debugMode)
@@ -208,6 +207,13 @@ async function getChangedFiles(
   debugMode: boolean
 ): Promise<ChangedFile[]> {
   const prNumber = github.context.payload.pull_request?.number;
+  
+  // Check if prNumber exists
+  if (!prNumber) {
+    core.warning("Pull request number not found. Cannot fetch changed files.");
+    return [];
+  }
+  
   const response = await client.rest.pulls.listFiles({
     owner: github.context.repo.owner,
     repo: github.context.repo.repo,
