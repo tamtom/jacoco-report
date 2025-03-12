@@ -127,9 +127,12 @@ function getFileCoverageFromPackages(
       return false;
     });
     if (githubFile) {
+      core.info(`Found matching file: ${name}`)
       const instruction = jacocoFile.counters.find(
         counter => counter.name === 'instruction'
       )
+      //print jacoco file info 
+      core.info(`jacocoFile: ${JSON.stringify(jacocoFile)}`)
       if (instruction) {
         const missed = instruction.missed
         const covered = instruction.covered
