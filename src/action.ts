@@ -191,7 +191,7 @@ async function getJsonReports(
 ): Promise<Report[]> {
   const globber = await glob.create(xmlPaths.join('\n'))
   const files = await globber.glob()
-  if (debugMode) core.info(`Resolved files: ${files}`)
+  if (debugMode) core.info(`Resolved filesV2: ${files}`)
 
   return Promise.all(
     files.map(async path => {
