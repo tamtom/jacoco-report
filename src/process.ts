@@ -10,6 +10,7 @@ export function getProjectCoverage(
 ): Project {
   const moduleCoverages: Module[] = []
   const modules = getModulesFromReports(reports)
+  core.info(`Found ${modules.length} modules and modules: ${JSON.stringify(modules)}`)
   for (const module of modules) {
     const files = getFileCoverageFromPackages(module.packages, changedFiles)
     if (files.length !== 0) {
