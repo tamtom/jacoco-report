@@ -272,41 +272,16 @@ async function getPrNumberAssociatedWithCommit(client, commitSha) {
 /***/ }),
 
 /***/ 6320:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 "use strict";
 
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || function (mod) {
-    if (mod && mod.__esModule) return mod;
-    var result = {};
-    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
-    __setModuleDefault(result, mod);
-    return result;
-};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.getProjectCoverage = getProjectCoverage;
 const util_1 = __nccwpck_require__(9685);
-const core = __importStar(__nccwpck_require__(7484));
 function getProjectCoverage(reports, changedFiles) {
     const moduleCoverages = [];
     const modules = getModulesFromReports(reports);
-    core.info(`Found ${modules.length} modules and modules: ${JSON.stringify(modules)}`);
     for (const module of modules) {
         const files = getFileCoverageFromPackages(module.packages, changedFiles);
         if (files.length !== 0) {
@@ -379,21 +354,6 @@ function getFileCoverageFromPackages(packages, files) {
     for (const jacocoFile of jacocoFiles) {
         const name = jacocoFile.name;
         const packageName = jacocoFile.packageName;
-        core.info(`Attempting to match JaCoCo file: ${packageName}/${name}`);
-        files.forEach(f => {
-            const endsWith = f.filePath.endsWith(`${packageName}/${name}`);
-            core.info(`Comparing with ${f.filePath}:`);
-            core.info(`- Path ends with "${packageName}/${name}": ${endsWith}`);
-            // Test alternative matching approaches
-            const endsWithName = f.filePath.endsWith(`/${name}`);
-            core.info(`- Path ends with "/${name}": ${endsWithName}`);
-            const packagePath = packageName.replace(/\./g, '/');
-            const includesPackagePath = f.filePath.includes(packagePath) && f.filePath.endsWith(name);
-            core.info(`- Includes package path "${packagePath}" and ends with "${name}": ${includesPackagePath}`);
-            const className = packageName.split(/[./]/).pop();
-            const includesClassName = className && f.filePath.includes(className) && f.filePath.endsWith(name);
-            core.info(`- Includes class name "${className}" and ends with "${name}": ${includesClassName}`);
-        });
         // More flexible matching logic
         const githubFile = files.find(function (f) {
             // Original matching logic

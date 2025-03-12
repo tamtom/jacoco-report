@@ -10,7 +10,6 @@ export function getProjectCoverage(
 ): Project {
   const moduleCoverages: Module[] = []
   const modules = getModulesFromReports(reports)
-  core.info(`Found ${modules.length} modules and modules: ${JSON.stringify(modules)}`)
   for (const module of modules) {
     const files = getFileCoverageFromPackages(module.packages, changedFiles)
     if (files.length !== 0) {
@@ -98,24 +97,6 @@ function getFileCoverageFromPackages(
   for (const jacocoFile of jacocoFiles) {
     const name = jacocoFile.name
     const packageName = jacocoFile.packageName
-    core.info(`Attempting to match JaCoCo file: ${packageName}/${name}`)
-    files.forEach(f => {
-      const endsWith = f.filePath.endsWith(`${packageName}/${name}`)
-      core.info(`Comparing with ${f.filePath}:`)
-      core.info(`- Path ends with "${packageName}/${name}": ${endsWith}`)
-      
-      // Test alternative matching approaches
-      const endsWithName = f.filePath.endsWith(`/${name}`)
-      core.info(`- Path ends with "/${name}": ${endsWithName}`)
-      
-      const packagePath = packageName.replace(/\./g, '/');
-      const includesPackagePath = f.filePath.includes(packagePath) && f.filePath.endsWith(name)
-      core.info(`- Includes package path "${packagePath}" and ends with "${name}": ${includesPackagePath}`)
-      
-      const className = packageName.split(/[./]/).pop();
-      const includesClassName = className && f.filePath.includes(className) && f.filePath.endsWith(name)
-      core.info(`- Includes class name "${className}" and ends with "${name}": ${includesClassName}`)
-    })
     // More flexible matching logic
     const githubFile = files.find(function (f) {
       // Original matching logic
