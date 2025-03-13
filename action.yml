@@ -4,6 +4,9 @@ inputs:
   paths:
     description: 'Comma separated paths of the generated jacoco xml files (supports wildcard glob pattern)'
     required: true
+  base-path:
+    description: 'Base report path to be used for relative path calculation'
+    required: true
   token:
     description: 'Github personal token to add comments to Pull Request'
     required: true

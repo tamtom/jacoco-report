@@ -219,7 +219,6 @@ export async function parseBaseReport(
         baseCoverageMap.set(key, coverage);
         baseCoverageMap.set(altKey, coverage); // Add alternative lookup by filename only
         
-        if (debugMode) core.info(`Base coverage for ${key}: ${coverage.percentage}%`);
       }
     }
     
