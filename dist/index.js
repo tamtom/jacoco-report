@@ -147,6 +147,12 @@ async function action() {
             core.info(`project: ${(0, util_1.debug)(project)}`);
         core.setOutput('coverage-overall', project.overall ? parseFloat(project.overall.percentage.toFixed(2)) : 100);
         core.setOutput('coverage-changed-files', parseFloat(project['coverage-changed-files'].toFixed(2)));
+        if (project.hasCoverageRegression) {
+            core.warning('Code coverage has decreased in one or more files.');
+            if (!continueOnError) {
+                core.setFailed('Code coverage regression detected.');
+            }
+        }
         const skip = skipIfNoChanges && project.modules.length === 0;
         if (debugMode)
             core.info(`skip: ${skip}`);
@@ -350,12 +356,25 @@ function getProjectCoverage(reports, changedFiles, baseCoverage) {
     const changedCoverage = getCoverage(moduleCoverages);
     const projectCoverage = getOverallProjectCoverage(reports);
     const totalPercentage = getTotalPercentage(totalFiles);
+    let hasCoverageRegression = false;
+    for (const module of moduleCoverages) {
+        for (const file of module.files) {
+            const baseDiff = file.changed?.baseDiff;
+            if (baseDiff !== undefined && baseDiff !== null && baseDiff < 0) {
+                hasCoverageRegression = true;
+                break;
+            }
+        }
+        if (hasCoverageRegression)
+            break;
+    }
     return {
         modules: moduleCoverages,
         isMultiModule: reports.length > 1 || modules.length > 1,
         overall: projectCoverage,
         changed: changedCoverage,
         'coverage-changed-files': totalPercentage ?? 100,
+        hasCoverageRegression
     };
 }
 function toFloat(value) {

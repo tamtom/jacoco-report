@@ -4,6 +4,7 @@ export interface Project {
   'coverage-changed-files': number
   overall: Coverage | null
   changed: Coverage | null
+  hasCoverageRegression?: boolean 
 }
 
 export interface Module {

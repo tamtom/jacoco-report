@@ -7,7 +7,7 @@ export function getProjectCoverage(
   reports: Report[],
   changedFiles: ChangedFile[],
   baseCoverage?: Map<string, Coverage>
-): Project {
+): Project & { hasCoverageRegression: boolean }  {
   const moduleCoverages: Module[] = [];
   const modules = getModulesFromReports(reports);
   
@@ -38,12 +38,25 @@ export function getProjectCoverage(
   const projectCoverage = getOverallProjectCoverage(reports);
   const totalPercentage = getTotalPercentage(totalFiles);
   
+  let hasCoverageRegression = false;
+  for (const module of moduleCoverages) {
+    for (const file of module.files) {
+      const baseDiff = file.changed?.baseDiff;
+      if (baseDiff !== undefined && baseDiff !== null && baseDiff < 0) {
+        hasCoverageRegression = true;
+        break;
+      }
+    }
+    if (hasCoverageRegression) break;
+  }
+  
   return {
     modules: moduleCoverages,
     isMultiModule: reports.length > 1 || modules.length > 1,
     overall: projectCoverage,
     changed: changedCoverage,
     'coverage-changed-files': totalPercentage ?? 100,
+    hasCoverageRegression
   };
 }
 

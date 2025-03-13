@@ -144,7 +144,12 @@ export async function action(): Promise<void> {
       'coverage-changed-files',
       parseFloat(project['coverage-changed-files'].toFixed(2))
     )
-
+    if (project.hasCoverageRegression) {
+      core.warning('Code coverage has decreased in one or more files.');
+      if (!continueOnError) {
+        core.setFailed('Code coverage regression detected.');
+      }
+    }
     const skip = skipIfNoChanges && project.modules.length === 0
     if (debugMode) core.info(`skip: ${skip}`)
     if (debugMode) core.info(`prNumber: ${prNumber}`)
