@@ -42,7 +42,7 @@ const render_1 = __nccwpck_require__(8789);
 const util_1 = __nccwpck_require__(9685);
 const util_2 = __nccwpck_require__(9685);
 async function action() {
-    let continueOnError = true;
+    let continueOnError = false;
     try {
         const token = core.getInput('token');
         if (!token) {
@@ -149,9 +149,7 @@ async function action() {
         core.setOutput('coverage-changed-files', parseFloat(project['coverage-changed-files'].toFixed(2)));
         if (project.hasCoverageRegression) {
             core.warning('Code coverage has decreased in one or more files.');
-            if (!continueOnError) {
-                core.setFailed('Code coverage regression detected.');
-            }
+            core.setFailed('Code coverage regression detected.');
         }
         const skip = skipIfNoChanges && project.modules.length === 0;
         if (debugMode)
