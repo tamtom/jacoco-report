@@ -11,6 +11,7 @@ import {Project} from './models/project'
 import {ChangedFile} from './models/github'
 import {Report} from './models/jacoco-types'
 import {GitHub} from '@actions/github/lib/utils'
+import {parseBaseReport} from './util'
 
 export async function action(): Promise<void> {
   let continueOnError = true
@@ -23,6 +24,11 @@ export async function action(): Promise<void> {
     const pathsString = core.getInput('paths')
     if (!pathsString) {
       core.setFailed("'paths' is missing")
+      return
+    }
+    const basePath = core.getInput('base-path')
+    if (!basePath) {
+      core.setFailed("'base-path' is missing")
       return
     }
 
@@ -111,13 +117,24 @@ export async function action(): Promise<void> {
     core.info(`head sha: ${head}`)
     if (debugMode) core.info(`reportPaths: ${reportPaths}`)
 
-    const changedFiles = await getChangedFiles(base, head, client, debugMode)
-    if (debugMode) core.info(`changedFiles: ${debug(changedFiles)}`)
+      const baseCoverage = basePath ? 
+      await parseBaseReport(basePath, debugMode) : 
+      undefined;
+    
+    if (debugMode && baseCoverage) {
+      core.info(`Base coverage map contains ${baseCoverage.size} entries`);
+    }
 
-    const reportsJsonAsync = getJsonReports(reportPaths, debugMode)
-    const reports = await reportsJsonAsync
 
-    const project: Project = getProjectCoverage(reports, changedFiles)
+    const changedFiles = await getChangedFiles(base, head, client, debugMode);
+    if (debugMode) core.info(`changedFiles: ${debug(changedFiles)}`);
+
+    const reportsJsonAsync = getJsonReports(reportPaths, debugMode);
+    const reports = await reportsJsonAsync;
+
+    // Pass baseCoverage to getProjectCoverage
+    const project: Project = getProjectCoverage(reports, changedFiles, baseCoverage);
+    
     if (debugMode) core.info(`project: ${debug(project)}`)
     core.setOutput(
       'coverage-overall',
@@ -198,6 +215,14 @@ async function getJsonReports(
       return await parseToReport(reportXml)
     })
   )
+}
+async function getJsonReport(
+  xmlPath: string,
+  debugMode: boolean
+): Promise<Report> {
+  if (debugMode) core.info(`getJsonReport xmlPath: ${xmlPath}`)
+  const reportXml = await fs.promises.readFile(xmlPath, 'utf-8')
+  return await parseToReport(reportXml)
 }
 
 async function getChangedFiles(

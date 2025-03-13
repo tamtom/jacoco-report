@@ -70,63 +70,74 @@ function getModuleTable(
   }
 }
 
+// Update getFileTable function in render.ts
 function getFileTable(
   project: Project,
   minCoverage: MinCoverage,
   emoji: Emoji
 ): string {
   const tableHeader = project.isMultiModule
-    ? '|Module|File|Coverage||'
-    : '|File|Coverage||'
+    ? '|Module|File|Coverage|Diff||'
+    : '|File|Coverage|Diff||';
   const tableStructure = project.isMultiModule
-    ? '|:-|:-|:-|:-:|'
-    : '|:-|:-|:-:|'
-  let table = `${tableHeader}\n${tableStructure}`
+    ? '|:-|:-|:-|:-:|:-:|'
+    : '|:-|:-|:-:|:-:|';
+  let table = `${tableHeader}\n${tableStructure}`;
+  
   for (const module of project.modules) {
     for (let index = 0; index < module.files.length; index++) {
-      const file = module.files[index]
-      let moduleName = module.name
+      const file = module.files[index];
+      let moduleName = module.name;
       if (index !== 0) {
-        moduleName = ''
+        moduleName = '';
       }
-      const coverageDifference = getCoverageDifference(
-        file.overall,
-        file.changed
-      )
+      
+      // Get the base diff from the changed coverage if available
+      const baseDiff = file.changed?.baseDiff !== undefined ? 
+        file.changed.baseDiff : 
+        (file.basePercentage !== undefined ? 
+          toFloat(file.overall.percentage - file.basePercentage) : 
+          null);
+      
       renderRow(
         moduleName,
         `[${file.name}](${file.url})`,
         file.overall.percentage,
-        coverageDifference,
+        baseDiff,
         file.changed?.percentage ?? null,
         project.isMultiModule
-      )
+      );
     }
   }
+  
   return project.isMultiModule
     ? `<details>\n<summary>Files</summary>\n\n${table}\n\n</details>`
-    : table
+    : table;
 
   function renderRow(
     moduleName: string,
     fileName: string,
     overallCoverage: number | null,
-    coverageDiff: number | null,
+    baseDiff: number | null,
     changedCoverage: number | null,
     isMultiModule: boolean
   ): void {
-    const status = getStatus(changedCoverage, minCoverage.changed, emoji)
-    let coveragePercentage = `${formatCoverage(overallCoverage)}`
-    if (shouldShow(coverageDiff)) {
-      coveragePercentage += ` **\`${formatCoverage(coverageDiff)}\`**`
+    const status = getStatus(changedCoverage, minCoverage.changed, emoji);
+    
+    let coveragePercentage = `${formatCoverage(overallCoverage)}`;
+    
+    let diffText = 'N/A';
+    if (baseDiff !== null) {
+      const sign = baseDiff >= 0 ? '+' : '';
+      diffText = `**\`${sign}${formatCoverage(baseDiff)}\`**`;
     }
-    const row = isMultiModule
-      ? `|${moduleName}|${fileName}|${coveragePercentage}|${status}|`
-      : `|${fileName}|${coveragePercentage}|${status}|`
-    table = `${table}\n${row}`
+        const row = isMultiModule
+      ? `|${moduleName}|${fileName}|${coveragePercentage}|${diffText}|${status}|`
+      : `|${fileName}|${coveragePercentage}|${diffText}|${status}|`;
+    
+    table = `${table}\n${row}`;
   }
 }
-
 function getCoverageDifference(
   overall: Coverage,
   changed: Coverage | null

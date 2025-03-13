@@ -1,6 +1,10 @@
 import {JacocoFile} from './models/jacoco'
 import parser from 'xml2js'
 import {Counter, Package, Report} from './models/jacoco-types'
+import { Coverage } from './models/project'
+import * as core from '@actions/core'
+import * as fs from 'fs'
+import { calculatePercentage } from './process'
 
 export function debug(obj: object): string {
   return JSON.stringify(obj, null, 4)
@@ -166,3 +170,64 @@ function convertObjToReport(obj: any): Report {
     counter: getCounter(obj),
   }
 }
+// Add this function to util.ts
+export async function parseBaseReport(
+  basePath: string,
+  debugMode: boolean
+): Promise<Map<string, Coverage>> {
+  const baseCoverageMap = new Map<string, Coverage>();
+  
+  if (!basePath) {
+    core.info('No base coverage path provided, skipping base comparison');
+    return baseCoverageMap;
+  }
+
+  try {
+    const reportXml = await fs.promises.readFile(basePath.trim(), 'utf-8');
+    const report = await parseToReport(reportXml);
+    
+    if (debugMode) core.info(`Successfully parsed base report`);
+    
+    // Get all packages from the report
+    const packages = report.package || [];
+    
+    // Also check packages in groups
+    if (report.group) {
+      for (const group of report.group) {
+        if (group.package) {
+          packages.push(...group.package);
+        }
+      }
+    }
+    
+    // Extract all files with coverage
+    const jacocoFiles = getFilesWithCoverage(packages);
+    
+    // Add each file's coverage to the map
+    for (const file of jacocoFiles) {
+      const instructionCounter = file.counters.find(counter => counter.name === 'instruction');
+      if (instructionCounter) {
+        const key = `${file.packageName}/${file.name}`;
+        const altKey = file.name; // Also store just by filename for flexible matching
+        
+        const coverage = {
+          missed: instructionCounter.missed,
+          covered: instructionCounter.covered,
+          percentage: calculatePercentage(instructionCounter.covered, instructionCounter.missed) ?? 0
+        };
+        
+        baseCoverageMap.set(key, coverage);
+        baseCoverageMap.set(altKey, coverage); // Add alternative lookup by filename only
+        
+        if (debugMode) core.info(`Base coverage for ${key}: ${coverage.percentage}%`);
+      }
+    }
+    
+    if (debugMode) core.info(`Total files in base coverage map: ${baseCoverageMap.size}`);
+    return baseCoverageMap;
+  } catch (error) {
+    core.warning(`Error processing base coverage: ${error}`);
+    return baseCoverageMap;
+  }
+}
+

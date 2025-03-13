@@ -14,17 +14,19 @@ export interface Module {
 }
 
 export interface File {
-  name: string
-  url: string
-  overall: Coverage
-  changed: Coverage | null
-  lines: Line[]
+  name: string;
+  url: string;
+  overall: Coverage;
+  changed: Coverage | null;
+  lines: Line[];
+  basePercentage?: number;
 }
 
 export interface Coverage {
-  missed: number
-  covered: number
-  percentage: number
+  missed: number;
+  covered: number;
+  percentage: number;
+  baseDiff?: number | null;
 }
 
 export interface Line {

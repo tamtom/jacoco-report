@@ -3,18 +3,21 @@ import {ChangedFile} from './models/github'
 import {Coverage, File, Line, Module, Project} from './models/project'
 import {Counter, Group, Package, Report} from './models/jacoco-types'
 import * as core from '@actions/core'
-
 export function getProjectCoverage(
   reports: Report[],
-  changedFiles: ChangedFile[]
+  changedFiles: ChangedFile[],
+  baseCoverage?: Map<string, Coverage>
 ): Project {
-  const moduleCoverages: Module[] = []
-  const modules = getModulesFromReports(reports)
+  const moduleCoverages: Module[] = [];
+  const modules = getModulesFromReports(reports);
+  
   for (const module of modules) {
-    const files = getFileCoverageFromPackages(module.packages, changedFiles)
+    // Pass baseCoverage to getFileCoverageFromPackages
+    const files = getFileCoverageFromPackages(module.packages, changedFiles, baseCoverage);
+    
     if (files.length !== 0) {
-      const moduleCoverage = getModuleCoverage(module.root)
-      const changedCoverage = getCoverage(files)
+      const moduleCoverage = getModuleCoverage(module.root);
+      const changedCoverage = getCoverage(files);
       moduleCoverages.push({
         name: module.name,
         files,
@@ -24,24 +27,24 @@ export function getProjectCoverage(
           missed: moduleCoverage.missed,
         },
         changed: changedCoverage,
-      })
+      });
     }
   }
-  moduleCoverages.sort((a, b) => b.overall.percentage - a.overall.percentage)
-  const totalFiles = moduleCoverages.flatMap(module => {
-    return module.files
-  })
-
-  const changedCoverage = getCoverage(moduleCoverages)
-  const projectCoverage = getOverallProjectCoverage(reports)
-  const totalPercentage = getTotalPercentage(totalFiles)
+  
+  // Rest of the function remains the same
+  moduleCoverages.sort((a, b) => b.overall.percentage - a.overall.percentage);
+  const totalFiles = moduleCoverages.flatMap(module => module.files);
+  const changedCoverage = getCoverage(moduleCoverages);
+  const projectCoverage = getOverallProjectCoverage(reports);
+  const totalPercentage = getTotalPercentage(totalFiles);
+  
   return {
     modules: moduleCoverages,
     isMultiModule: reports.length > 1 || modules.length > 1,
     overall: projectCoverage,
     changed: changedCoverage,
     'coverage-changed-files': totalPercentage ?? 100,
-  }
+  };
 }
 
 function toFloat(value: number): number {
@@ -89,7 +92,8 @@ function getModuleFromParent(parent: Report | Group): LocalModule | null {
 
 function getFileCoverageFromPackages(
   packages: Package[],
-  files: ChangedFile[]
+  files: ChangedFile[],
+  baseCoverage?: Map<string, Coverage>
 ): File[] {
   const resultFiles: File[] = []
   const jacocoFiles = getFilesWithCoverage(packages)
@@ -127,91 +131,109 @@ function getFileCoverageFromPackages(
       return false;
     });
     if (githubFile) {
-      core.info(`Found matching file: ${name}`)
+     core.info(`Found matching file: ${name}`);
+      
       const instruction = jacocoFile.counters.find(
         counter => counter.name === 'instruction'
-      )
-      //print jacoco file info 
-      core.info(`jacocoFile: ${JSON.stringify(jacocoFile)}`)
+      );
+      
       if (instruction) {
-        const missed = instruction.missed
-        const covered = instruction.covered
-        const lines: Line[] = []
+        const missed = instruction.missed;
+        const covered = instruction.covered;
+        
+        // Get base coverage if available
+        let baseCoverageInfo = undefined;
+        if (baseCoverage) {
+          // Try different formats to find match
+          const fullKey = `${packageName}/${name}`;
+          baseCoverageInfo = baseCoverage.get(fullKey) || baseCoverage.get(name);
+        }
+
+        // Process changed lines coverage or use file-level comparison
+        let changedCoverage = null;
+        let lines: Line[] = [];
+        
+        // Standard line-by-line processing
         for (const lineNumber of githubFile.lines) {
           const jacocoLine = jacocoFile.lines.find(
             line => line.number === lineNumber
-          )
+          );
           if (jacocoLine) {
             const line: Line = {
               number: lineNumber,
               instruction: {
                 missed: jacocoLine.instruction.missed,
                 covered: jacocoLine.instruction.covered,
-                percentage:
-                  calculatePercentage(
-                    jacocoLine.instruction.covered,
-                    jacocoLine.instruction.missed
-                  ) ?? 0,
+                percentage: calculatePercentage(
+                  jacocoLine.instruction.covered,
+                  jacocoLine.instruction.missed
+                ) ?? 0,
               },
               branch: {
                 missed: jacocoLine.branch.missed,
                 covered: jacocoLine.branch.covered,
-                percentage:
-                  calculatePercentage(
-                    jacocoLine.branch.covered,
-                    jacocoLine.branch.missed
-                  ) ?? 0,
+                percentage: calculatePercentage(
+                  jacocoLine.branch.covered,
+                  jacocoLine.branch.missed
+                ) ?? 0,
               },
-            }
-            lines.push(line)
+            };
+            lines.push(line);
           }
         }
         const changedMissed = lines
-          .map(line => toFloat(line.instruction.missed))
-          .reduce(sumReducer, 0.0)
-        const changedCovered = lines
-          .map(line => toFloat(line.instruction.covered))
-          .reduce(sumReducer, 0.0)
-        const changedPercentage = calculatePercentage(
-          changedCovered,
-          changedMissed
-        )
-        const changedCoverage =
-          changedPercentage !== null
-            ? {
-                missed: changedMissed,
-                covered: changedCovered,
-                percentage: changedPercentage,
-              }
-            : null
-        const overallPercentage = calculatePercentage(covered, missed)
-        const overallCoverage =
-          overallPercentage !== null
-            ? {missed, covered, percentage: overallPercentage}
-            : null
-        if (overallCoverage) {
-          resultFiles.push({
-            name,
-            url: githubFile.url,
-            overall: overallCoverage,
-            changed: changedCoverage,
-            lines,
-          })
-        }
+        .map(line => toFloat(line.instruction.missed))
+        .reduce(sumReducer, 0.0);
+      const changedCovered = lines
+        .map(line => toFloat(line.instruction.covered))
+        .reduce(sumReducer, 0.0);
+      const changedPercentage = calculatePercentage(
+        changedCovered,
+        changedMissed
+      );
+      
+      changedCoverage = changedPercentage !== null
+        ? {
+            missed: changedMissed,
+            covered: changedCovered,
+            percentage: changedPercentage,
+            // Add base diff if we have base coverage
+            baseDiff: baseCoverageInfo && calculatePercentage(covered, missed) !== null ? 
+            toFloat((calculatePercentage(covered, missed) as number) - baseCoverageInfo.percentage) : 
+            null
+          }
+        : null;
+      
+      const overallPercentage = calculatePercentage(covered, missed);
+      const overallCoverage =
+        overallPercentage !== null
+          ? {missed, covered, percentage: overallPercentage}
+          : null;
+      
+      if (overallCoverage) {
+        resultFiles.push({
+          name,
+          url: githubFile.url,
+          overall: overallCoverage,
+          changed: changedCoverage,
+          lines,
+          basePercentage: baseCoverageInfo?.percentage
+        });
       }
     }
   }
-  resultFiles.sort((a, b) => b.overall.percentage - a.overall.percentage)
-
-  return resultFiles
 }
 
-function calculatePercentage(covered: number, missed: number): number | null {
-  const total = covered + missed
+resultFiles.sort((a, b) => b.overall.percentage - a.overall.percentage);
+return resultFiles;
+}
+
+export function calculatePercentage(covered: number, missed: number): number | null {
+  const total = covered + missed;
   if (total !== 0) {
-    return parseFloat(((covered / total) * 100).toFixed(2))
+    return parseFloat(((covered / total) * 100).toFixed(2));
   } else {
-    return null
+    return null;
   }
 }
 

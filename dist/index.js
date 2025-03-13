@@ -40,6 +40,7 @@ const glob = __importStar(__nccwpck_require__(7206));
 const process_1 = __nccwpck_require__(6320);
 const render_1 = __nccwpck_require__(8789);
 const util_1 = __nccwpck_require__(9685);
+const util_2 = __nccwpck_require__(9685);
 async function action() {
     let continueOnError = true;
     try {
@@ -51,6 +52,11 @@ async function action() {
         const pathsString = core.getInput('paths');
         if (!pathsString) {
             core.setFailed("'paths' is missing");
+            return;
+        }
+        const basePath = core.getInput('base-path');
+        if (!basePath) {
+            core.setFailed("'base-path' is missing");
             return;
         }
         const reportPaths = pathsString.split(',');
@@ -124,12 +130,19 @@ async function action() {
         core.info(`head sha: ${head}`);
         if (debugMode)
             core.info(`reportPaths: ${reportPaths}`);
+        const baseCoverage = basePath ?
+            await (0, util_2.parseBaseReport)(basePath, debugMode) :
+            undefined;
+        if (debugMode && baseCoverage) {
+            core.info(`Base coverage map contains ${baseCoverage.size} entries`);
+        }
         const changedFiles = await getChangedFiles(base, head, client, debugMode);
         if (debugMode)
             core.info(`changedFiles: ${(0, util_1.debug)(changedFiles)}`);
         const reportsJsonAsync = getJsonReports(reportPaths, debugMode);
         const reports = await reportsJsonAsync;
-        const project = (0, process_1.getProjectCoverage)(reports, changedFiles);
+        // Pass baseCoverage to getProjectCoverage
+        const project = (0, process_1.getProjectCoverage)(reports, changedFiles, baseCoverage);
         if (debugMode)
             core.info(`project: ${(0, util_1.debug)(project)}`);
         core.setOutput('coverage-overall', project.overall ? parseFloat(project.overall.percentage.toFixed(2)) : 100);
@@ -183,6 +196,12 @@ async function getJsonReports(xmlPaths, debugMode) {
         const reportXml = await fs.promises.readFile(path.trim(), 'utf-8');
         return await (0, util_1.parseToReport)(reportXml);
     }));
+}
+async function getJsonReport(xmlPath, debugMode) {
+    if (debugMode)
+        core.info(`getJsonReport xmlPath: ${xmlPath}`);
+    const reportXml = await fs.promises.readFile(xmlPath, 'utf-8');
+    return await (0, util_1.parseToReport)(reportXml);
 }
 async function getChangedFiles(base, head, client, debugMode) {
     const prNumber = github.context.payload.pull_request?.number;
@@ -301,13 +320,15 @@ var __importStar = (this && this.__importStar) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.getProjectCoverage = getProjectCoverage;
+exports.calculatePercentage = calculatePercentage;
 const util_1 = __nccwpck_require__(9685);
 const core = __importStar(__nccwpck_require__(7484));
-function getProjectCoverage(reports, changedFiles) {
+function getProjectCoverage(reports, changedFiles, baseCoverage) {
     const moduleCoverages = [];
     const modules = getModulesFromReports(reports);
     for (const module of modules) {
-        const files = getFileCoverageFromPackages(module.packages, changedFiles);
+        // Pass baseCoverage to getFileCoverageFromPackages
+        const files = getFileCoverageFromPackages(module.packages, changedFiles, baseCoverage);
         if (files.length !== 0) {
             const moduleCoverage = getModuleCoverage(module.root);
             const changedCoverage = getCoverage(files);
@@ -323,10 +344,9 @@ function getProjectCoverage(reports, changedFiles) {
             });
         }
     }
+    // Rest of the function remains the same
     moduleCoverages.sort((a, b) => b.overall.percentage - a.overall.percentage);
-    const totalFiles = moduleCoverages.flatMap(module => {
-        return module.files;
-    });
+    const totalFiles = moduleCoverages.flatMap(module => module.files);
     const changedCoverage = getCoverage(moduleCoverages);
     const projectCoverage = getOverallProjectCoverage(reports);
     const totalPercentage = getTotalPercentage(totalFiles);
@@ -372,7 +392,7 @@ function getModuleFromParent(parent) {
     }
     return null;
 }
-function getFileCoverageFromPackages(packages, files) {
+function getFileCoverageFromPackages(packages, files, baseCoverage) {
     const resultFiles = [];
     const jacocoFiles = (0, util_1.getFilesWithCoverage)(packages);
     for (const jacocoFile of jacocoFiles) {
@@ -406,12 +426,20 @@ function getFileCoverageFromPackages(packages, files) {
         if (githubFile) {
             core.info(`Found matching file: ${name}`);
             const instruction = jacocoFile.counters.find(counter => counter.name === 'instruction');
-            //print jacoco file info 
-            core.info(`jacocoFile: ${JSON.stringify(jacocoFile)}`);
             if (instruction) {
                 const missed = instruction.missed;
                 const covered = instruction.covered;
-                const lines = [];
+                // Get base coverage if available
+                let baseCoverageInfo = undefined;
+                if (baseCoverage) {
+                    // Try different formats to find match
+                    const fullKey = `${packageName}/${name}`;
+                    baseCoverageInfo = baseCoverage.get(fullKey) || baseCoverage.get(name);
+                }
+                // Process changed lines coverage or use file-level comparison
+                let changedCoverage = null;
+                let lines = [];
+                // Standard line-by-line processing
                 for (const lineNumber of githubFile.lines) {
                     const jacocoLine = jacocoFile.lines.find(line => line.number === lineNumber);
                     if (jacocoLine) {
@@ -438,11 +466,15 @@ function getFileCoverageFromPackages(packages, files) {
                     .map(line => toFloat(line.instruction.covered))
                     .reduce(sumReducer, 0.0);
                 const changedPercentage = calculatePercentage(changedCovered, changedMissed);
-                const changedCoverage = changedPercentage !== null
+                changedCoverage = changedPercentage !== null
                     ? {
                         missed: changedMissed,
                         covered: changedCovered,
                         percentage: changedPercentage,
+                        // Add base diff if we have base coverage
+                        baseDiff: baseCoverageInfo && calculatePercentage(covered, missed) !== null ?
+                            toFloat(calculatePercentage(covered, missed) - baseCoverageInfo.percentage) :
+                            null
                     }
                     : null;
                 const overallPercentage = calculatePercentage(covered, missed);
@@ -456,6 +488,7 @@ function getFileCoverageFromPackages(packages, files) {
                         overall: overallCoverage,
                         changed: changedCoverage,
                         lines,
+                        basePercentage: baseCoverageInfo?.percentage
                     });
                 }
             }
@@ -591,13 +624,14 @@ function getModuleTable(modules, minCoverage, emoji) {
         table = `${table}\n${row}`;
     }
 }
+// Update getFileTable function in render.ts
 function getFileTable(project, minCoverage, emoji) {
     const tableHeader = project.isMultiModule
-        ? '|Module|File|Coverage||'
-        : '|File|Coverage||';
+        ? '|Module|File|Coverage|Diff||'
+        : '|File|Coverage|Diff||';
     const tableStructure = project.isMultiModule
-        ? '|:-|:-|:-|:-:|'
-        : '|:-|:-|:-:|';
+        ? '|:-|:-|:-|:-:|:-:|'
+        : '|:-|:-|:-:|:-:|';
     let table = `${tableHeader}\n${tableStructure}`;
     for (const module of project.modules) {
         for (let index = 0; index < module.files.length; index++) {
@@ -606,22 +640,29 @@ function getFileTable(project, minCoverage, emoji) {
             if (index !== 0) {
                 moduleName = '';
             }
-            const coverageDifference = getCoverageDifference(file.overall, file.changed);
-            renderRow(moduleName, `[${file.name}](${file.url})`, file.overall.percentage, coverageDifference, file.changed?.percentage ?? null, project.isMultiModule);
+            // Get the base diff from the changed coverage if available
+            const baseDiff = file.changed?.baseDiff !== undefined ?
+                file.changed.baseDiff :
+                (file.basePercentage !== undefined ?
+                    toFloat(file.overall.percentage - file.basePercentage) :
+                    null);
+            renderRow(moduleName, `[${file.name}](${file.url})`, file.overall.percentage, baseDiff, file.changed?.percentage ?? null, project.isMultiModule);
         }
     }
     return project.isMultiModule
         ? `<details>\n<summary>Files</summary>\n\n${table}\n\n</details>`
         : table;
-    function renderRow(moduleName, fileName, overallCoverage, coverageDiff, changedCoverage, isMultiModule) {
+    function renderRow(moduleName, fileName, overallCoverage, baseDiff, changedCoverage, isMultiModule) {
         const status = getStatus(changedCoverage, minCoverage.changed, emoji);
         let coveragePercentage = `${formatCoverage(overallCoverage)}`;
-        if (shouldShow(coverageDiff)) {
-            coveragePercentage += ` **\`${formatCoverage(coverageDiff)}\`**`;
+        let diffText = 'N/A';
+        if (baseDiff !== null) {
+            const sign = baseDiff >= 0 ? '+' : '';
+            diffText = `**\`${sign}${formatCoverage(baseDiff)}\`**`;
         }
         const row = isMultiModule
-            ? `|${moduleName}|${fileName}|${coveragePercentage}|${status}|`
-            : `|${fileName}|${coveragePercentage}|${status}|`;
+            ? `|${moduleName}|${fileName}|${coveragePercentage}|${diffText}|${status}|`
+            : `|${fileName}|${coveragePercentage}|${diffText}|${status}|`;
         table = `${table}\n${row}`;
     }
 }
@@ -702,6 +743,29 @@ function toFloat(value) {
 
 "use strict";
 
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -710,7 +774,11 @@ exports.debug = debug;
 exports.getChangedLines = getChangedLines;
 exports.getFilesWithCoverage = getFilesWithCoverage;
 exports.parseToReport = parseToReport;
+exports.parseBaseReport = parseBaseReport;
 const xml2js_1 = __importDefault(__nccwpck_require__(758));
+const core = __importStar(__nccwpck_require__(7484));
+const fs = __importStar(__nccwpck_require__(9896));
+const process_1 = __nccwpck_require__(6320);
 function debug(obj) {
     return JSON.stringify(obj, null, 4);
 }
@@ -860,6 +928,56 @@ function convertObjToReport(obj) {
         package: getPackage(obj),
         counter: getCounter(obj),
     };
+}
+// Add this function to util.ts
+async function parseBaseReport(basePath, debugMode) {
+    const baseCoverageMap = new Map();
+    if (!basePath) {
+        core.info('No base coverage path provided, skipping base comparison');
+        return baseCoverageMap;
+    }
+    try {
+        const reportXml = await fs.promises.readFile(basePath.trim(), 'utf-8');
+        const report = await parseToReport(reportXml);
+        if (debugMode)
+            core.info(`Successfully parsed base report`);
+        // Get all packages from the report
+        const packages = report.package || [];
+        // Also check packages in groups
+        if (report.group) {
+            for (const group of report.group) {
+                if (group.package) {
+                    packages.push(...group.package);
+                }
+            }
+        }
+        // Extract all files with coverage
+        const jacocoFiles = getFilesWithCoverage(packages);
+        // Add each file's coverage to the map
+        for (const file of jacocoFiles) {
+            const instructionCounter = file.counters.find(counter => counter.name === 'instruction');
+            if (instructionCounter) {
+                const key = `${file.packageName}/${file.name}`;
+                const altKey = file.name; // Also store just by filename for flexible matching
+                const coverage = {
+                    missed: instructionCounter.missed,
+                    covered: instructionCounter.covered,
+                    percentage: (0, process_1.calculatePercentage)(instructionCounter.covered, instructionCounter.missed) ?? 0
+                };
+                baseCoverageMap.set(key, coverage);
+                baseCoverageMap.set(altKey, coverage); // Add alternative lookup by filename only
+                if (debugMode)
+                    core.info(`Base coverage for ${key}: ${coverage.percentage}%`);
+            }
+        }
+        if (debugMode)
+            core.info(`Total files in base coverage map: ${baseCoverageMap.size}`);
+        return baseCoverageMap;
+    }
+    catch (error) {
+        core.warning(`Error processing base coverage: ${error}`);
+        return baseCoverageMap;
+    }
 }
 
 
