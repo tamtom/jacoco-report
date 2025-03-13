@@ -14,7 +14,7 @@ import {GitHub} from '@actions/github/lib/utils'
 import {parseBaseReport} from './util'
 
 export async function action(): Promise<void> {
-  let continueOnError = true
+  let continueOnError = false
   try {
     const token = core.getInput('token')
     if (!token) {
@@ -146,9 +146,8 @@ export async function action(): Promise<void> {
     )
     if (project.hasCoverageRegression) {
       core.warning('Code coverage has decreased in one or more files.');
-      if (!continueOnError) {
         core.setFailed('Code coverage regression detected.');
-      }
+      
     }
     const skip = skipIfNoChanges && project.modules.length === 0
     if (debugMode) core.info(`skip: ${skip}`)
