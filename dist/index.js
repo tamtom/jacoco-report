@@ -615,7 +615,7 @@ function getModuleTable(modules, minCoverage, emoji) {
     }
     return table;
     function renderRow(name, overallCoverage, coverageDiff, changedCoverage) {
-        const status = getStatus(changedCoverage, minCoverage.changed, emoji);
+        const status = getStatus(changedCoverage, null, minCoverage.changed, emoji);
         let coveragePercentage = `${formatCoverage(overallCoverage)}`;
         if (shouldShow(coverageDiff)) {
             coveragePercentage += ` **\`${formatCoverage(coverageDiff)}\`**`;
@@ -653,7 +653,7 @@ function getFileTable(project, minCoverage, emoji) {
         ? `<details>\n<summary>Files</summary>\n\n${table}\n\n</details>`
         : table;
     function renderRow(moduleName, fileName, overallCoverage, baseDiff, changedCoverage, isMultiModule) {
-        const status = getStatus(changedCoverage, minCoverage.changed, emoji);
+        const status = getStatus(changedCoverage, baseDiff, minCoverage.changed, emoji);
         let coveragePercentage = `${formatCoverage(overallCoverage)}`;
         let diffText = 'N/A';
         if (baseDiff !== null) {
@@ -679,7 +679,8 @@ function getCoverageDifference(overall, changed) {
         return null;
 }
 function getOverallTable(overall, changed, minCoverage, emoji) {
-    const overallStatus = getStatus(overall.percentage, minCoverage.overall, emoji);
+    const overallStatus = getStatus(overall.percentage, null, // Add null for baseDiff
+    minCoverage.overall, emoji);
     const coverageDifference = getCoverageDifference(overall, changed);
     let coveragePercentage = `${formatCoverage(overall.percentage)}`;
     if (shouldShow(coverageDifference)) {
@@ -693,7 +694,7 @@ function getOverallTable(overall, changed, minCoverage, emoji) {
     let changedCoverageRow = '';
     if (totalChangedLines !== 0) {
         const changedLinesPercentage = (coveredLines / totalChangedLines) * 100;
-        const filesChangedStatus = getStatus(changedLinesPercentage, minCoverage.changed, emoji);
+        const filesChangedStatus = getStatus(changedLinesPercentage, null, minCoverage.changed, emoji);
         changedCoverageRow =
             '\n' +
                 `|Files changed|${formatCoverage(changedLinesPercentage)}|${filesChangedStatus}|` +
@@ -719,9 +720,18 @@ function getTitle(title) {
         return '';
     }
 }
-function getStatus(coverage, minCoverage, emoji) {
+function getStatus(coverage, baseDiff, minCoverage, emoji) {
+    // Default status is pass
     let status = emoji.pass;
-    if (coverage !== null && coverage < minCoverage) {
+    // If we have a base diff, check if it's negative
+    if (baseDiff !== null) {
+        // If coverage decreased, fail
+        if (baseDiff < 0) {
+            status = emoji.fail;
+        }
+    }
+    // If no base diff or null, fall back to checking against threshold
+    else if (coverage !== null && coverage < minCoverage) {
         status = emoji.fail;
     }
     return status;
@@ -966,8 +976,6 @@ async function parseBaseReport(basePath, debugMode) {
                 };
                 baseCoverageMap.set(key, coverage);
                 baseCoverageMap.set(altKey, coverage); // Add alternative lookup by filename only
-                if (debugMode)
-                    core.info(`Base coverage for ${key}: ${coverage.percentage}%`);
             }
         }
         if (debugMode)

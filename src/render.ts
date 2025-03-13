@@ -60,7 +60,7 @@ function getModuleTable(
     coverageDiff: number | null,
     changedCoverage: number | null
   ): void {
-    const status = getStatus(changedCoverage, minCoverage.changed, emoji)
+    const status = getStatus(changedCoverage, null, minCoverage.changed, emoji)
     let coveragePercentage = `${formatCoverage(overallCoverage)}`
     if (shouldShow(coverageDiff)) {
       coveragePercentage += ` **\`${formatCoverage(coverageDiff)}\`**`
@@ -122,7 +122,7 @@ function getFileTable(
     changedCoverage: number | null,
     isMultiModule: boolean
   ): void {
-    const status = getStatus(changedCoverage, minCoverage.changed, emoji);
+const status = getStatus(changedCoverage, baseDiff, minCoverage.changed, emoji);
     
     let coveragePercentage = `${formatCoverage(overallCoverage)}`;
     
@@ -159,6 +159,7 @@ function getOverallTable(
 ): string {
   const overallStatus = getStatus(
     overall.percentage,
+    null, // Add null for baseDiff
     minCoverage.overall,
     emoji
   )
@@ -178,6 +179,7 @@ function getOverallTable(
     const changedLinesPercentage = (coveredLines / totalChangedLines) * 100
     const filesChangedStatus = getStatus(
       changedLinesPercentage,
+      null, 
       minCoverage.changed,
       emoji
     )
@@ -212,14 +214,26 @@ export function getTitle(title?: string): string {
 
 function getStatus(
   coverage: number | null,
+  baseDiff: number | null,
   minCoverage: number,
   emoji: Emoji
 ): string {
-  let status = emoji.pass
-  if (coverage !== null && coverage < minCoverage) {
-    status = emoji.fail
+  // Default status is pass
+  let status = emoji.pass;
+  
+  // If we have a base diff, check if it's negative
+  if (baseDiff !== null) {
+    // If coverage decreased, fail
+    if (baseDiff < 0) {
+      status = emoji.fail;
+    }
+  } 
+  // If no base diff or null, fall back to checking against threshold
+  else if (coverage !== null && coverage < minCoverage) {
+    status = emoji.fail;
   }
-  return status
+  
+  return status;
 }
 
 function formatCoverage(coverage: number | null): string {
