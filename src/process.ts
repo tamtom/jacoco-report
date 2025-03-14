@@ -102,70 +102,68 @@ function getModuleFromParent(parent: Report | Group): LocalModule | null {
   }
   return null
 }
-
 function getFileCoverageFromPackages(
   packages: Package[],
   files: ChangedFile[],
   baseCoverage?: Map<string, Coverage>
 ): File[] {
-  const resultFiles: File[] = []
-  const jacocoFiles = getFilesWithCoverage(packages)
-  
+  const resultFiles: File[] = [];
+  const jacocoFiles = getFilesWithCoverage(packages);
+
   for (const jacocoFile of jacocoFiles) {
-    const name = jacocoFile.name
-    const packageName = jacocoFile.packageName
-    // More flexible matching logic
-    const githubFile = files.find(function (f) {
+    const name = jacocoFile.name;
+    const packageName = jacocoFile.packageName;
+
+    // Flexible matching logic
+    const githubFile = files.find(function(f) {
       // Original matching logic
       if (f.filePath.endsWith(`${packageName}/${name}`)) {
         return true;
       }
-      
-      // Additional matching for just the filename
-      // This will match files regardless of package structure
+      // Additional matching filename
+      // Match files regardless package structure
       if (f.filePath.endsWith(`/${name}`)) {
         return true;
       }
-      
-      // Handle package path conversion for Kotlin files
-      // Convert package dots to slashes for comparison
+      // Handle package path conversion kotlin files
+      // Convert package dots slashes comparison
       const packagePath = packageName.replace(/\./g, '/');
       if (f.filePath.includes(packagePath) && f.filePath.endsWith(name)) {
         return true;
       }
-      
-      // For Kotlin Multiplatform, check if the class name part matches
-      // Extract the class name from package name (last part after dot/slash)
+      // Kotlin multiplatform, check class name part matches
+      // Extract class name package name (last part dot/slash)
       const className = packageName.split(/[./]/).pop();
       if (className && f.filePath.includes(className) && f.filePath.endsWith(name)) {
         return true;
       }
-      
       return false;
     });
-    if (githubFile) {
-     core.info(`Found matching file: ${name}`);
-      
-      const instruction = jacocoFile.counters.find(
-        counter => counter.name === 'instruction'
-      );
-      
-      if (instruction) {
-        const missed = instruction.missed;
-        const covered = instruction.covered;
-        
-        // Get base coverage if available
-        let baseCoverageInfo = undefined;
-        if (baseCoverage) {
-          // Try different formats to find match
-          const fullKey = `${packageName}/${name}`;
-          baseCoverageInfo = baseCoverage.get(fullKey) || baseCoverage.get(name);
-        }
 
-        // Process changed lines coverage or use file-level comparison
-        let changedCoverage = null;
-        let lines: Line[] = [];
-        
+    // Get base coverage available
+    let baseCoverageInfo = undefined;
+    if (baseCoverage) {
+      // Try different formats to find match
+      const fullKey = `${packageName}/${name}`;
+      baseCoverageInfo = baseCoverage.get(fullKey) || baseCoverage.get(name);
+    }
+
+    const instruction = jacocoFile.counters.find(
+      counter => counter.name === 'instruction'
+    );
+
+    if (instruction) {
+      const missed = instruction.missed;
+      const covered = instruction.covered;
+      const currentPercentage = calculatePercentage(covered, missed);
+
+
+      // Process changed lines coverage use file-level comparison
+      let changedCoverage = null;
+      let lines: Line[] = [];
+
+      if (githubFile) {
+        core.info(`Found matching file: ${name}`);
         // Standard line-by-line processing
         for (const lineNumber of githubFile.lines) {
           const jacocoLine = jacocoFile.lines.find(
@@ -194,53 +192,85 @@ function getFileCoverageFromPackages(
             lines.push(line);
           }
         }
+
         const changedMissed = lines
-        .map(line => toFloat(line.instruction.missed))
-        .reduce(sumReducer, 0.0);
-      const changedCovered = lines
-        .map(line => toFloat(line.instruction.covered))
-        .reduce(sumReducer, 0.0);
-      const changedPercentage = calculatePercentage(
-        changedCovered,
-        changedMissed
-      );
-      
-      changedCoverage = changedPercentage !== null
-        ? {
-            missed: changedMissed,
-            covered: changedCovered,
-            percentage: changedPercentage,
-            // Add base diff if we have base coverage
-            baseDiff: baseCoverageInfo && calculatePercentage(covered, missed) !== null ? 
-            toFloat((calculatePercentage(covered, missed) as number) - baseCoverageInfo.percentage) : 
-            null
-          }
-        : null;
-      
-      const overallPercentage = calculatePercentage(covered, missed);
-      const overallCoverage =
-        overallPercentage !== null
-          ? {missed, covered, percentage: overallPercentage}
-          : null;
-      
-      if (overallCoverage) {
-        resultFiles.push({
-          name,
-          url: githubFile.url,
-          overall: overallCoverage,
-          changed: changedCoverage,
-          lines,
-          basePercentage: baseCoverageInfo?.percentage
-        });
+          .map(line => toFloat(line.instruction.missed))
+          .reduce(sumReducer, 0.0);
+        const changedCovered = lines
+          .map(line => toFloat(line.instruction.covered))
+          .reduce(sumReducer, 0.0);
+        const changedPercentage = calculatePercentage(
+          changedCovered,
+          changedMissed
+        );
+
+        changedCoverage = changedPercentage !== null ? {
+          missed: changedMissed,
+          covered: changedCovered,
+          percentage: changedPercentage,
+          // Add base diff base coverage
+          baseDiff: baseCoverageInfo?.percentage !== undefined && currentPercentage !== null ?
+            toFloat(currentPercentage - baseCoverageInfo.percentage) : null
+        } : null;
+
+        const overallCoverage = currentPercentage !== null ? {
+          missed,
+          covered,
+          percentage: currentPercentage
+        } : null;
+
+        if (overallCoverage) {
+          resultFiles.push({
+            name,
+            url: githubFile.url,
+            overall: overallCoverage,
+            changed: changedCoverage,
+            lines,
+            basePercentage: baseCoverageInfo?.percentage
+          });
+        }
+      }
+      // Also process files with coverage differences
+      else if (baseCoverageInfo && baseCoverageInfo.percentage !== undefined && currentPercentage !== null) {
+        const coverageDiff = toFloat(currentPercentage - baseCoverageInfo.percentage);
+        
+        // Only include file if there's a coverage difference
+        if (coverageDiff !== 0) {
+          core.info(`Found coverage difference for ${name}: ${coverageDiff}`);
+          
+          const overallCoverage = {
+            missed, 
+            covered, 
+            percentage: currentPercentage
+          };
+          
+          // Use a placeholder URL for linking
+          const url = "#";
+          
+          // Set up changedCoverage with baseDiff
+          const changedCoverage = {
+            missed: 0,
+            covered: 0,
+            percentage: currentPercentage,
+            baseDiff: coverageDiff
+          };
+          
+          resultFiles.push({
+            name,
+            url,
+            overall: overallCoverage,
+            changed: changedCoverage,
+            lines: [],
+            basePercentage: baseCoverageInfo.percentage
+          });
+        }
       }
     }
   }
-}
 
-resultFiles.sort((a, b) => b.overall.percentage - a.overall.percentage);
-return resultFiles;
+  resultFiles.sort((a, b) => b.overall.percentage - a.overall.percentage);
+  return resultFiles;
 }
-
 export function calculatePercentage(covered: number, missed: number): number | null {
   const total = covered + missed;
   if (total !== 0) {
