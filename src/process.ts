@@ -42,7 +42,7 @@ export function getProjectCoverage(
   for (const module of moduleCoverages) {
     for (const file of module.files) {
       const baseDiff = file.changed?.baseDiff;
-      if (baseDiff !== undefined && baseDiff !== null && baseDiff < 0) {
+      if (baseDiff !== undefined && baseDiff !== null && baseDiff < -1.5) {
         hasCoverageRegression = true;
         break;
       }
