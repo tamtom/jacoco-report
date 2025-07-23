@@ -147,10 +147,6 @@ async function action() {
             core.info(`project: ${(0, util_1.debug)(project)}`);
         core.setOutput('coverage-overall', project.overall ? parseFloat(project.overall.percentage.toFixed(2)) : 100);
         core.setOutput('coverage-changed-files', parseFloat(project['coverage-changed-files'].toFixed(2)));
-        if (project.hasCoverageRegression) {
-            core.warning('Code coverage has decreased in one or more files.');
-            core.setFailed('Code coverage regression detected.');
-        }
         const skip = skipIfNoChanges && project.modules.length === 0;
         if (debugMode)
             core.info(`skip: ${skip}`);
@@ -178,6 +174,11 @@ async function action() {
                     await addWorkflowSummary(bodyFormatted);
                     break;
             }
+        }
+        // Check for coverage regression AFTER posting the comment
+        if (project.hasCoverageRegression) {
+            core.warning('Code coverage has decreased in one or more files.');
+            core.setFailed('Code coverage regression detected.');
         }
     }
     catch (error) {
@@ -327,6 +328,7 @@ exports.getProjectCoverage = getProjectCoverage;
 exports.calculatePercentage = calculatePercentage;
 const util_1 = __nccwpck_require__(9685);
 const core = __importStar(__nccwpck_require__(7484));
+const github = __importStar(__nccwpck_require__(3228));
 function getProjectCoverage(reports, changedFiles, baseCoverage) {
     const moduleCoverages = [];
     const modules = getModulesFromReports(reports);
@@ -358,7 +360,7 @@ function getProjectCoverage(reports, changedFiles, baseCoverage) {
     for (const module of moduleCoverages) {
         for (const file of module.files) {
             const baseDiff = file.changed?.baseDiff;
-            if (baseDiff !== undefined && baseDiff !== null && baseDiff < -1.5) {
+            if (baseDiff !== undefined && baseDiff !== null && baseDiff < -0.5) {
                 hasCoverageRegression = true;
                 break;
             }
@@ -377,6 +379,23 @@ function getProjectCoverage(reports, changedFiles, baseCoverage) {
 }
 function toFloat(value) {
     return parseFloat(value.toFixed(2));
+}
+function generateGitHubFileUrl(fileName, packageName) {
+    const { owner, repo } = github.context.repo;
+    const sha = github.context.sha;
+    // Convert package name to path (replace dots with slashes)
+    const packagePath = packageName.replace(/\./g, '/');
+    // Determine file extension and likely source directory
+    let sourceDir = 'src/main/java';
+    if (fileName.endsWith('.kt')) {
+        sourceDir = 'src/main/kotlin';
+    }
+    else if (fileName.endsWith('.js') || fileName.endsWith('.ts')) {
+        sourceDir = 'src';
+    }
+    // Build the most likely path
+    const filePath = `${sourceDir}/${packagePath}/${fileName}`;
+    return `https://github.com/${owner}/${repo}/blob/${sha}/${filePath}`;
 }
 function getModulesFromReports(reports) {
     const modules = [];
@@ -500,7 +519,7 @@ function getFileCoverageFromPackages(packages, files, baseCoverage) {
                 if (overallCoverage) {
                     resultFiles.push({
                         name,
-                        url: githubFile.url,
+                        url: githubFile?.url || generateGitHubFileUrl(name, packageName),
                         overall: overallCoverage,
                         changed: changedCoverage,
                         lines,
@@ -519,8 +538,8 @@ function getFileCoverageFromPackages(packages, files, baseCoverage) {
                         covered,
                         percentage: currentPercentage
                     };
-                    // Use a placeholder URL for linking
-                    const url = "#";
+                    // Generate proper GitHub URL for the file
+                    const url = generateGitHubFileUrl(name, packageName);
                     // Set up changedCoverage with baseDiff
                     const changedCoverage = {
                         missed: 0,

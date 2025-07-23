@@ -144,11 +144,6 @@ export async function action(): Promise<void> {
       'coverage-changed-files',
       parseFloat(project['coverage-changed-files'].toFixed(2))
     )
-    if (project.hasCoverageRegression) {
-      core.warning('Code coverage has decreased in one or more files.');
-        core.setFailed('Code coverage regression detected.');
-      
-    }
     const skip = skipIfNoChanges && project.modules.length === 0
     if (debugMode) core.info(`skip: ${skip}`)
     if (debugMode) core.info(`prNumber: ${prNumber}`)
@@ -193,6 +188,12 @@ export async function action(): Promise<void> {
           await addWorkflowSummary(bodyFormatted)
           break
       }
+    }
+    
+    // Check for coverage regression AFTER posting the comment
+    if (project.hasCoverageRegression) {
+      core.warning('Code coverage has decreased in one or more files.');
+      core.setFailed('Code coverage regression detected.');
     }
   } catch (error) {
     if (error instanceof Error) {

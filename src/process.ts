@@ -3,6 +3,7 @@ import {ChangedFile} from './models/github'
 import {Coverage, File, Line, Module, Project} from './models/project'
 import {Counter, Group, Package, Report} from './models/jacoco-types'
 import * as core from '@actions/core'
+import * as github from '@actions/github'
 export function getProjectCoverage(
   reports: Report[],
   changedFiles: ChangedFile[],
@@ -42,7 +43,7 @@ export function getProjectCoverage(
   for (const module of moduleCoverages) {
     for (const file of module.files) {
       const baseDiff = file.changed?.baseDiff;
-      if (baseDiff !== undefined && baseDiff !== null && baseDiff < -1.5) {
+      if (baseDiff !== undefined && baseDiff !== null && baseDiff < -0.5) {
         hasCoverageRegression = true;
         break;
       }
@@ -62,6 +63,27 @@ export function getProjectCoverage(
 
 function toFloat(value: number): number {
   return parseFloat(value.toFixed(2))
+}
+
+function generateGitHubFileUrl(fileName: string, packageName: string): string {
+  const {owner, repo} = github.context.repo;
+  const sha = github.context.sha;
+  
+  // Convert package name to path (replace dots with slashes)
+  const packagePath = packageName.replace(/\./g, '/');
+  
+  // Determine file extension and likely source directory
+  let sourceDir = 'src/main/java';
+  if (fileName.endsWith('.kt')) {
+    sourceDir = 'src/main/kotlin';
+  } else if (fileName.endsWith('.js') || fileName.endsWith('.ts')) {
+    sourceDir = 'src';
+  }
+  
+  // Build the most likely path
+  const filePath = `${sourceDir}/${packagePath}/${fileName}`;
+  
+  return `https://github.com/${owner}/${repo}/blob/${sha}/${filePath}`;
 }
 
 function getModulesFromReports(reports: Report[]): LocalModule[] {
@@ -222,7 +244,7 @@ function getFileCoverageFromPackages(
         if (overallCoverage) {
           resultFiles.push({
             name,
-            url: githubFile.url,
+            url: githubFile?.url || generateGitHubFileUrl(name, packageName),
             overall: overallCoverage,
             changed: changedCoverage,
             lines,
@@ -244,8 +266,8 @@ function getFileCoverageFromPackages(
             percentage: currentPercentage
           };
           
-          // Use a placeholder URL for linking
-          const url = "#";
+          // Generate proper GitHub URL for the file
+          const url = generateGitHubFileUrl(name, packageName);
           
           // Set up changedCoverage with baseDiff
           const changedCoverage = {
