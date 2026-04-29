@@ -235,6 +235,8 @@ async function getChangedFiles(client, debugMode) {
             filePath: file.filename,
             url: file.blob_url,
             lines: (0, util_1.getChangedLines)(file.patch),
+            status: file.status,
+            previousFilePath: file.previous_filename,
         });
     }
     return changedFiles;
@@ -388,10 +390,16 @@ function getProjectCoverage(reports, changedFiles, baseCoverage, baseOverall, th
     overallDrop: 1.0,
     failOnUncoveredNewFile: true,
 }) {
+    // We need a baseline to reason about regressions. If the base coverage
+    // artifact failed to download (e.g. develop's post-merge run hasn't
+    // produced one yet), every file in the PR will look 'new' which would
+    // flood false positives. Detect that and skip regression gating
+    // entirely for this run — the comment will say so explicitly.
+    const hasBaseline = (baseCoverage !== undefined && baseCoverage.size > 0) || baseOverall != null;
     const moduleCoverages = [];
     const modules = getModulesFromReports(reports);
     for (const module of modules) {
-        const files = getFileCoverageFromPackages(module.packages, changedFiles, baseCoverage, thresholds);
+        const files = getFileCoverageFromPackages(module.packages, changedFiles, baseCoverage, thresholds, hasBaseline);
         if (files.length !== 0) {
             const moduleCoverage = getModuleCoverage(module.root);
             const changedCoverage = getCoverage(files);
@@ -442,7 +450,7 @@ function getProjectCoverage(reports, changedFiles, baseCoverage, baseOverall, th
     }
     let overallDrop;
     let baseOverallPercentage;
-    if (baseOverall && projectCoverage) {
+    if (hasBaseline && baseOverall && projectCoverage) {
         baseOverallPercentage = baseOverall.percentage;
         overallDrop = toFloat(baseOverall.percentage - projectCoverage.percentage);
         if (overallDrop > thresholds.overallDrop) {
@@ -464,6 +472,7 @@ function getProjectCoverage(reports, changedFiles, baseCoverage, baseOverall, th
         baseOverallPercentage,
         overallDrop,
         regressions,
+        hasBaseline,
         hasCoverageRegression: regressions.length > 0,
     };
 }
@@ -541,7 +550,7 @@ function getModuleFromParent(parent) {
     }
     return null;
 }
-function getFileCoverageFromPackages(packages, files, baseCoverage, thresholds) {
+function getFileCoverageFromPackages(packages, files, baseCoverage, thresholds, hasBaseline = true) {
     const resultFiles = [];
     const jacocoFiles = (0, util_1.getFilesWithCoverage)(packages);
     const fileDropThreshold = thresholds?.fileDrop ?? 1.0;
@@ -616,12 +625,22 @@ function getFileCoverageFromPackages(packages, files, baseCoverage, thresholds) 
             baseDiff,
         } : null;
         const overallCoverage = { missed, covered, percentage: currentPercentage };
-        const isNew = baseCoverageInfo === undefined;
+        // GitHub's PR-file status is the authoritative "new file" signal.
+        // Don't infer from missing base coverage — jacoco may not report on
+        // a file (no methods, excluded by config, etc.) which would cause
+        // false positives.
+        const isNew = githubFile.status === 'added';
         let regressionReason;
         if (isNew && failOnUncoveredNewFile && covered === 0) {
+            // New uncovered file: gate regardless of baseline presence —
+            // we know from the diff alone that this file was just added.
             regressionReason = 'new-uncovered';
         }
-        else if (!isNew && baseDiff !== null && baseDiff < -fileDropThreshold) {
+        else if (!isNew &&
+            hasBaseline &&
+            baseDiff !== null &&
+            baseDiff < -fileDropThreshold) {
+            // Existing file that lost coverage: requires a baseline to detect.
             regressionReason = 'file-dropped';
         }
         resultFiles.push({
@@ -758,20 +777,35 @@ function renderBody(project, minCoverage, emoji) {
     return `${summary}${regressionsBlock}\n\n${overallTable}\n\n${tables}`;
 }
 function renderSummary(project, emoji) {
-    if ((project.regressions ?? []).length === 0) {
-        return `${emoji.pass} **No coverage regression detected for changed files.**\n`;
+    const regressions = project.regressions ?? [];
+    const noBaseline = project.hasBaseline === false;
+    // Build the regression line first (works with or without baseline —
+    // new-uncovered is detected from the PR diff alone).
+    let regressionLine = '';
+    if (regressions.length === 0) {
+        regressionLine = `${emoji.pass} **No coverage regression detected for changed files.**`;
     }
-    const newUncovered = (project.regressions ?? []).filter(r => r.type === 'new-uncovered').length;
-    const fileDropped = (project.regressions ?? []).filter(r => r.type === 'file-dropped').length;
-    const overallDrop = (project.regressions ?? []).filter(r => r.type === 'overall-drop').length;
-    const parts = [];
-    if (newUncovered)
-        parts.push(`${newUncovered} new uncovered file${newUncovered === 1 ? '' : 's'}`);
-    if (fileDropped)
-        parts.push(`${fileDropped} file${fileDropped === 1 ? '' : 's'} with coverage drop`);
-    if (overallDrop)
-        parts.push(`overall coverage drop`);
-    return `${emoji.fail} **Coverage regression detected:** ${parts.join(', ')}.\n`;
+    else {
+        const newUncovered = regressions.filter(r => r.type === 'new-uncovered').length;
+        const fileDropped = regressions.filter(r => r.type === 'file-dropped').length;
+        const overallDrop = regressions.filter(r => r.type === 'overall-drop').length;
+        const parts = [];
+        if (newUncovered)
+            parts.push(`${newUncovered} new uncovered file${newUncovered === 1 ? '' : 's'}`);
+        if (fileDropped)
+            parts.push(`${fileDropped} file${fileDropped === 1 ? '' : 's'} with coverage drop`);
+        if (overallDrop)
+            parts.push(`overall coverage drop`);
+        regressionLine = `${emoji.fail} **Coverage regression detected:** ${parts.join(', ')}.`;
+    }
+    if (noBaseline) {
+        return [
+            `⚠️ **Baseline coverage unavailable** — file-drop and overall-drop checks were skipped this run. New uncovered files are still gated below.`,
+            regressionLine,
+            '',
+        ].join('\n');
+    }
+    return `${regressionLine}\n`;
 }
 function renderRegressions(project) {
     if ((project.regressions ?? []).length === 0)
@@ -830,10 +864,15 @@ function getFileTable(project, minCoverage, emoji) {
         ? '|:-|:-|:-|:-:|:-:|'
         : '|:-|:-|:-:|:-:|';
     let table = `${tableHeader}\n${tableStructure}`;
+    // When there's no baseline we can't classify files as new/regressed, so
+    // fall back to showing every changed file (informational). Otherwise
+    // filter to only files that need attention.
+    const noBaseline = project.hasBaseline === false;
     let rowCount = 0;
     for (const module of project.modules) {
-        // Only render files that are new or regressed — skip green files to reduce noise.
-        const visibleFiles = module.files.filter(f => f.isRegressed || f.isNew);
+        const visibleFiles = noBaseline
+            ? module.files
+            : module.files.filter(f => f.isRegressed || f.isNew);
         if (visibleFiles.length === 0)
             continue;
         for (let index = 0; index < visibleFiles.length; index++) {

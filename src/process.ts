@@ -15,11 +15,19 @@ export function getProjectCoverage(
     failOnUncoveredNewFile: true,
   }
 ): Project & { hasCoverageRegression: boolean } {
+  // We need a baseline to reason about regressions. If the base coverage
+  // artifact failed to download (e.g. develop's post-merge run hasn't
+  // produced one yet), every file in the PR will look 'new' which would
+  // flood false positives. Detect that and skip regression gating
+  // entirely for this run — the comment will say so explicitly.
+  const hasBaseline =
+    (baseCoverage !== undefined && baseCoverage.size > 0) || baseOverall != null;
+
   const moduleCoverages: Module[] = [];
   const modules = getModulesFromReports(reports);
 
   for (const module of modules) {
-    const files = getFileCoverageFromPackages(module.packages, changedFiles, baseCoverage, thresholds);
+    const files = getFileCoverageFromPackages(module.packages, changedFiles, baseCoverage, thresholds, hasBaseline);
 
     if (files.length !== 0) {
       const moduleCoverage = getModuleCoverage(module.root);
@@ -74,7 +82,7 @@ export function getProjectCoverage(
 
   let overallDrop: number | undefined;
   let baseOverallPercentage: number | undefined;
-  if (baseOverall && projectCoverage) {
+  if (hasBaseline && baseOverall && projectCoverage) {
     baseOverallPercentage = baseOverall.percentage;
     overallDrop = toFloat(baseOverall.percentage - projectCoverage.percentage);
     if (overallDrop > thresholds.overallDrop) {
@@ -97,6 +105,7 @@ export function getProjectCoverage(
     baseOverallPercentage,
     overallDrop,
     regressions,
+    hasBaseline,
     hasCoverageRegression: regressions.length > 0,
   };
 }
@@ -193,7 +202,8 @@ function getFileCoverageFromPackages(
   packages: Package[],
   files: ChangedFile[],
   baseCoverage?: Map<string, Coverage>,
-  thresholds?: RegressionThresholds
+  thresholds?: RegressionThresholds,
+  hasBaseline: boolean = true
 ): File[] {
   const resultFiles: File[] = [];
   const jacocoFiles = getFilesWithCoverage(packages);
@@ -280,11 +290,23 @@ function getFileCoverageFromPackages(
 
     const overallCoverage = {missed, covered, percentage: currentPercentage};
 
-    const isNew = baseCoverageInfo === undefined;
+    // GitHub's PR-file status is the authoritative "new file" signal.
+    // Don't infer from missing base coverage — jacoco may not report on
+    // a file (no methods, excluded by config, etc.) which would cause
+    // false positives.
+    const isNew = githubFile.status === 'added';
     let regressionReason: 'new-uncovered' | 'file-dropped' | undefined;
     if (isNew && failOnUncoveredNewFile && covered === 0) {
+      // New uncovered file: gate regardless of baseline presence —
+      // we know from the diff alone that this file was just added.
       regressionReason = 'new-uncovered';
-    } else if (!isNew && baseDiff !== null && baseDiff < -fileDropThreshold) {
+    } else if (
+      !isNew &&
+      hasBaseline &&
+      baseDiff !== null &&
+      baseDiff < -fileDropThreshold
+    ) {
+      // Existing file that lost coverage: requires a baseline to detect.
       regressionReason = 'file-dropped';
     }
 

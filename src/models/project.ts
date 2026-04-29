@@ -7,6 +7,7 @@ export interface Project {
   baseOverallPercentage?: number
   overallDrop?: number
   regressions?: Regression[]
+  hasBaseline?: boolean
   hasCoverageRegression?: boolean
 }
 

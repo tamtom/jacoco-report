@@ -256,6 +256,8 @@ async function getChangedFiles(
       filePath: file.filename,
       url: file.blob_url,
       lines: getChangedLines(file.patch),
+      status: file.status as ChangedFile['status'],
+      previousFilePath: (file as any).previous_filename,
     })
   }
   return changedFiles
