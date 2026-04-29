@@ -170,27 +170,32 @@ function convertObjToReport(obj: any): Report {
     counter: getCounter(obj),
   }
 }
+export interface BaseReport {
+  files: Map<string, Coverage>
+  overall: Coverage | null
+}
+
 // Add this function to util.ts
 export async function parseBaseReport(
   basePath: string,
   debugMode: boolean
-): Promise<Map<string, Coverage>> {
+): Promise<BaseReport> {
   const baseCoverageMap = new Map<string, Coverage>();
-  
+
   if (!basePath) {
     core.info('No base coverage path provided, skipping base comparison');
-    return baseCoverageMap;
+    return { files: baseCoverageMap, overall: null };
   }
 
   try {
     const reportXml = await fs.promises.readFile(basePath.trim(), 'utf-8');
     const report = await parseToReport(reportXml);
-    
+
     if (debugMode) core.info(`Successfully parsed base report`);
-    
+
     // Get all packages from the report
     const packages = report.package || [];
-    
+
     // Also check packages in groups
     if (report.group) {
       for (const group of report.group) {
@@ -199,34 +204,48 @@ export async function parseBaseReport(
         }
       }
     }
-    
+
     // Extract all files with coverage
     const jacocoFiles = getFilesWithCoverage(packages);
-    
+
     // Add each file's coverage to the map
     for (const file of jacocoFiles) {
       const instructionCounter = file.counters.find(counter => counter.name === 'instruction');
       if (instructionCounter) {
         const key = `${file.packageName}/${file.name}`;
         const altKey = file.name; // Also store just by filename for flexible matching
-        
+
         const coverage = {
           missed: instructionCounter.missed,
           covered: instructionCounter.covered,
           percentage: calculatePercentage(instructionCounter.covered, instructionCounter.missed) ?? 0
         };
-        
+
         baseCoverageMap.set(key, coverage);
         baseCoverageMap.set(altKey, coverage); // Add alternative lookup by filename only
-        
+
       }
     }
-    
-    if (debugMode) core.info(`Total files in base coverage map: ${baseCoverageMap.size}`);
-    return baseCoverageMap;
+
+    // Capture project-level overall coverage from base
+    const rootCounters = report.counter ?? [];
+    const baseInstr = rootCounters.find(c => c.type === 'INSTRUCTION');
+    const overall: Coverage | null = baseInstr
+      ? {
+          missed: baseInstr.missed,
+          covered: baseInstr.covered,
+          percentage: calculatePercentage(baseInstr.covered, baseInstr.missed) ?? 0,
+        }
+      : null;
+
+    if (debugMode) {
+      core.info(`Total files in base coverage map: ${baseCoverageMap.size}`);
+      if (overall) core.info(`Base overall coverage: ${overall.percentage}%`);
+    }
+    return { files: baseCoverageMap, overall };
   } catch (error) {
     core.warning(`Error processing base coverage: ${error}`);
-    return baseCoverageMap;
+    return { files: baseCoverageMap, overall: null };
   }
 }
 
