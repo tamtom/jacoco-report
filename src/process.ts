@@ -30,7 +30,7 @@ export function getProjectCoverage(
     const files = getFileCoverageFromPackages(module.packages, changedFiles, baseCoverage, thresholds, hasBaseline);
 
     if (files.length !== 0) {
-      const moduleCoverage = getModuleCoverage(module.root);
+      const moduleCoverage = getModuleCoverage(module.packages);
       const changedCoverage = getCoverage(files);
       moduleCoverages.push({
         name: module.name,
@@ -160,43 +160,51 @@ function generateGitHubFileUrl(fileName: string, packageName: string, changedFil
   return `https://github.com/${owner}/${repo}/blob/${sha}/${bestGuessPath}`;
 }
 
+// Bucket packages into modules based on the third segment of their JVM
+// package path (e.g. "com/travel/profile_ui_private/coverage_canary"
+// -> module "profile_ui_private"). This matches the project's existing
+// jacoco_report.py convention and means a single combinedReport.xml
+// surfaces real per-module names instead of a single bucket named after
+// the Gradle root project.
 function getModulesFromReports(reports: Report[]): LocalModule[] {
-  const modules = []
+  const moduleMap = new Map<string, LocalModule>()
+
+  const ingest = (parent: Report | Group): void => {
+    const packages = parent.package
+    if (!packages || packages.length === 0) return
+    for (const pkg of packages) {
+      const moduleName = extractModuleName(pkg.name) ?? parent.name ?? 'unknown'
+      let mod = moduleMap.get(moduleName)
+      if (!mod) {
+        mod = { name: moduleName, packages: [] }
+        moduleMap.set(moduleName, mod)
+      }
+      mod.packages.push(pkg)
+    }
+  }
+
   for (const report of reports) {
     const groupTag = report.group
     if (groupTag) {
-      const groups = groupTag.filter(group => group !== undefined)
-      for (const group of groups) {
-        const module = getModuleFromParent(group)
-        if (module) {
-          modules.push(module)
-        }
+      for (const group of groupTag.filter(g => g !== undefined)) {
+        ingest(group)
       }
     }
-    const module = getModuleFromParent(report)
-    if (module) {
-      modules.push(module)
-    }
+    ingest(report)
   }
-  return modules
+
+  return Array.from(moduleMap.values())
+}
+
+function extractModuleName(packageName: string): string | null {
+  if (!packageName) return null
+  const parts = packageName.split('/')
+  return parts.length >= 3 ? parts[2] : null
 }
 
 interface LocalModule {
   name: string
   packages: Package[]
-  root: Report | Group
-}
-
-function getModuleFromParent(parent: Report | Group): LocalModule | null {
-  const packages = parent.package
-  if (packages && packages.length !== 0) {
-    return {
-      name: parent.name,
-      packages,
-      root: parent, // TODO just pass array of 'counters'
-    }
-  }
-  return null
 }
 function getFileCoverageFromPackages(
   packages: Package[],
@@ -349,9 +357,22 @@ function getTotalPercentage(files: File[]): number | null {
   }
 }
 
-function getModuleCoverage(report: Report | Group): Coverage {
-  const counters = report.counter ?? []
-  return getDetailedCoverage(counters, 'INSTRUCTION')
+function getModuleCoverage(packages: Package[]): Coverage {
+  let covered = 0
+  let missed = 0
+  for (const pkg of packages) {
+    const counter = (pkg.counter ?? []).find(c => c.type === 'INSTRUCTION')
+    if (counter) {
+      covered += counter.covered
+      missed += counter.missed
+    }
+  }
+  if (covered + missed === 0) return { covered: 0, missed: 0, percentage: 0 }
+  return {
+    covered,
+    missed,
+    percentage: parseFloat(((covered / (covered + missed)) * 100).toFixed(2)),
+  }
 }
 
 function getOverallProjectCoverage(reports: Report[]): Coverage | null {

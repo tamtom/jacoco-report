@@ -401,7 +401,7 @@ function getProjectCoverage(reports, changedFiles, baseCoverage, baseOverall, th
     for (const module of modules) {
         const files = getFileCoverageFromPackages(module.packages, changedFiles, baseCoverage, thresholds, hasBaseline);
         if (files.length !== 0) {
-            const moduleCoverage = getModuleCoverage(module.root);
+            const moduleCoverage = getModuleCoverage(module.packages);
             const changedCoverage = getCoverage(files);
             moduleCoverages.push({
                 name: module.name,
@@ -519,36 +519,44 @@ function generateGitHubFileUrl(fileName, packageName, changedFiles) {
     }
     return `https://github.com/${owner}/${repo}/blob/${sha}/${bestGuessPath}`;
 }
+// Bucket packages into modules based on the third segment of their JVM
+// package path (e.g. "com/travel/profile_ui_private/coverage_canary"
+// -> module "profile_ui_private"). This matches the project's existing
+// jacoco_report.py convention and means a single combinedReport.xml
+// surfaces real per-module names instead of a single bucket named after
+// the Gradle root project.
 function getModulesFromReports(reports) {
-    const modules = [];
+    const moduleMap = new Map();
+    const ingest = (parent) => {
+        const packages = parent.package;
+        if (!packages || packages.length === 0)
+            return;
+        for (const pkg of packages) {
+            const moduleName = extractModuleName(pkg.name) ?? parent.name ?? 'unknown';
+            let mod = moduleMap.get(moduleName);
+            if (!mod) {
+                mod = { name: moduleName, packages: [] };
+                moduleMap.set(moduleName, mod);
+            }
+            mod.packages.push(pkg);
+        }
+    };
     for (const report of reports) {
         const groupTag = report.group;
         if (groupTag) {
-            const groups = groupTag.filter(group => group !== undefined);
-            for (const group of groups) {
-                const module = getModuleFromParent(group);
-                if (module) {
-                    modules.push(module);
-                }
+            for (const group of groupTag.filter(g => g !== undefined)) {
+                ingest(group);
             }
         }
-        const module = getModuleFromParent(report);
-        if (module) {
-            modules.push(module);
-        }
+        ingest(report);
     }
-    return modules;
+    return Array.from(moduleMap.values());
 }
-function getModuleFromParent(parent) {
-    const packages = parent.package;
-    if (packages && packages.length !== 0) {
-        return {
-            name: parent.name,
-            packages,
-            root: parent, // TODO just pass array of 'counters'
-        };
-    }
-    return null;
+function extractModuleName(packageName) {
+    if (!packageName)
+        return null;
+    const parts = packageName.split('/');
+    return parts.length >= 3 ? parts[2] : null;
 }
 function getFileCoverageFromPackages(packages, files, baseCoverage, thresholds, hasBaseline = true) {
     const resultFiles = [];
@@ -681,9 +689,23 @@ function getTotalPercentage(files) {
         return null;
     }
 }
-function getModuleCoverage(report) {
-    const counters = report.counter ?? [];
-    return getDetailedCoverage(counters, 'INSTRUCTION');
+function getModuleCoverage(packages) {
+    let covered = 0;
+    let missed = 0;
+    for (const pkg of packages) {
+        const counter = (pkg.counter ?? []).find(c => c.type === 'INSTRUCTION');
+        if (counter) {
+            covered += counter.covered;
+            missed += counter.missed;
+        }
+    }
+    if (covered + missed === 0)
+        return { covered: 0, missed: 0, percentage: 0 };
+    return {
+        covered,
+        missed,
+        percentage: parseFloat(((covered / (covered + missed)) * 100).toFixed(2)),
+    };
 }
 function getOverallProjectCoverage(reports) {
     const coverages = reports.map(report => {
@@ -765,7 +787,8 @@ function renderBody(project, minCoverage, emoji) {
     }
     const summary = renderSummary(project, emoji);
     const regressionsBlock = renderRegressions(project);
-    const overallTable = getOverallTable(project.overall, project.changed, minCoverage, emoji, project.baseOverallPercentage, project.overallDrop);
+    const projectHasRegression = (project.regressions ?? []).length > 0;
+    const overallTable = getOverallTable(project.overall, project.changed, minCoverage, emoji, project.baseOverallPercentage, project.overallDrop, projectHasRegression);
     const moduleTable = getModuleTable(project.modules, minCoverage, emoji);
     const filesTable = getFileTable(project, minCoverage, emoji);
     if (project.modules.length === 0) {
@@ -843,11 +866,12 @@ function getModuleTable(modules, minCoverage, emoji) {
     let table = `${tableHeader}\n${tableStructure}`;
     for (const module of regressedModules) {
         const coverageDifference = getCoverageDifference(module.overall, module.changed);
-        renderRow(module.name, module.overall.percentage, coverageDifference, module.changed?.percentage ?? null);
+        const moduleHasRegression = module.files.some(f => f.isRegressed);
+        renderRow(module.name, module.overall.percentage, coverageDifference, module.changed?.percentage ?? null, moduleHasRegression);
     }
     return table;
-    function renderRow(name, overallCoverage, coverageDiff, changedCoverage) {
-        const status = getStatus(changedCoverage, null, minCoverage.changed, emoji);
+    function renderRow(name, overallCoverage, coverageDiff, changedCoverage, regressed) {
+        const status = getStatus(changedCoverage, null, minCoverage.changed, emoji, regressed);
         let coveragePercentage = `${formatCoverage(overallCoverage)}`;
         if (shouldShow(coverageDiff)) {
             coveragePercentage += ` **\`${formatCoverage(coverageDiff)}\`**`;
@@ -886,7 +910,7 @@ function getFileTable(project, minCoverage, emoji) {
                     ? toFloat(file.overall.percentage - file.basePercentage)
                     : null);
             const displayName = file.isNew ? `🆕 ${file.name}` : file.name;
-            renderRow(moduleName, `[${displayName}](${file.url})`, file.overall.percentage, baseDiff, file.changed?.percentage ?? null, project.isMultiModule, file.isNew === true);
+            renderRow(moduleName, `[${displayName}](${file.url})`, file.overall.percentage, baseDiff, file.changed?.percentage ?? null, project.isMultiModule, file.isNew === true, file.isRegressed === true);
             rowCount++;
         }
     }
@@ -895,8 +919,8 @@ function getFileTable(project, minCoverage, emoji) {
     return project.isMultiModule
         ? `<details open>\n<summary><b>Files needing attention</b></summary>\n\n${table}\n\n</details>`
         : table;
-    function renderRow(moduleName, fileName, overallCoverage, baseDiff, changedCoverage, isMultiModule, isNew) {
-        const status = getStatus(changedCoverage, baseDiff, minCoverage.changed, emoji);
+    function renderRow(moduleName, fileName, overallCoverage, baseDiff, changedCoverage, isMultiModule, isNew, regressed) {
+        const status = getStatus(changedCoverage, baseDiff, minCoverage.changed, emoji, regressed);
         let coveragePercentage = `${formatCoverage(overallCoverage)}`;
         let diffText;
         if (isNew) {
@@ -927,8 +951,8 @@ function getCoverageDifference(overall, changed) {
     else
         return null;
 }
-function getOverallTable(overall, changed, minCoverage, emoji, baseOverallPercentage, overallDrop) {
-    const overallStatus = getStatus(overall.percentage, null, minCoverage.overall, emoji);
+function getOverallTable(overall, changed, minCoverage, emoji, baseOverallPercentage, overallDrop, projectHasRegression = false) {
+    const overallStatus = getStatus(overall.percentage, null, minCoverage.overall, emoji, projectHasRegression);
     let coveragePercentage = `${formatCoverage(overall.percentage)}`;
     if (baseOverallPercentage !== undefined && overallDrop !== undefined && overallDrop !== 0) {
         const sign = overallDrop > 0 ? '-' : '+';
@@ -948,7 +972,7 @@ function getOverallTable(overall, changed, minCoverage, emoji, baseOverallPercen
     let changedCoverageRow = '';
     if (totalChangedLines !== 0) {
         const changedLinesPercentage = (coveredLines / totalChangedLines) * 100;
-        const filesChangedStatus = getStatus(changedLinesPercentage, null, minCoverage.changed, emoji);
+        const filesChangedStatus = getStatus(changedLinesPercentage, null, minCoverage.changed, emoji, projectHasRegression);
         changedCoverageRow =
             '\n' +
                 `|Files changed (diff coverage)|${formatCoverage(changedLinesPercentage)}|${filesChangedStatus}|` +
@@ -974,7 +998,13 @@ function getTitle(title) {
         return '';
     }
 }
-function getStatus(coverage, baseDiff, minCoverage, emoji) {
+function getStatus(coverage, baseDiff, minCoverage, emoji, regressed = false) {
+    // If our gate says this row is a regression, force fail regardless of
+    // the coverage/threshold heuristics — those don't know about
+    // new-uncovered/file-dropped regressions and would otherwise show 🟢
+    // on a row the gate just failed on.
+    if (regressed)
+        return emoji.fail;
     let status = emoji.pass;
     if (baseDiff !== null) {
         if (baseDiff < 0)

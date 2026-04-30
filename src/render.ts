@@ -26,13 +26,15 @@ function renderBody(
   }
   const summary = renderSummary(project, emoji)
   const regressionsBlock = renderRegressions(project)
+  const projectHasRegression = (project.regressions ?? []).length > 0
   const overallTable = getOverallTable(
     project.overall,
     project.changed,
     minCoverage,
     emoji,
     project.baseOverallPercentage,
-    project.overallDrop
+    project.overallDrop,
+    projectHasRegression
   )
   const moduleTable = getModuleTable(project.modules, minCoverage, emoji)
   const filesTable = getFileTable(project, minCoverage, emoji)
@@ -123,11 +125,13 @@ function getModuleTable(
       module.overall,
       module.changed
     )
+    const moduleHasRegression = module.files.some(f => f.isRegressed)
     renderRow(
       module.name,
       module.overall.percentage,
       coverageDifference,
-      module.changed?.percentage ?? null
+      module.changed?.percentage ?? null,
+      moduleHasRegression
     )
   }
   return table
@@ -136,9 +140,10 @@ function getModuleTable(
     name: string,
     overallCoverage: number | null,
     coverageDiff: number | null,
-    changedCoverage: number | null
+    changedCoverage: number | null,
+    regressed: boolean
   ): void {
-    const status = getStatus(changedCoverage, null, minCoverage.changed, emoji)
+    const status = getStatus(changedCoverage, null, minCoverage.changed, emoji, regressed)
     let coveragePercentage = `${formatCoverage(overallCoverage)}`
     if (shouldShow(coverageDiff)) {
       coveragePercentage += ` **\`${formatCoverage(coverageDiff)}\`**`
@@ -191,7 +196,8 @@ function getFileTable(
         baseDiff,
         file.changed?.percentage ?? null,
         project.isMultiModule,
-        file.isNew === true
+        file.isNew === true,
+        file.isRegressed === true
       );
       rowCount++;
     }
@@ -210,9 +216,10 @@ function getFileTable(
     baseDiff: number | null,
     changedCoverage: number | null,
     isMultiModule: boolean,
-    isNew: boolean
+    isNew: boolean,
+    regressed: boolean
   ): void {
-    const status = getStatus(changedCoverage, baseDiff, minCoverage.changed, emoji);
+    const status = getStatus(changedCoverage, baseDiff, minCoverage.changed, emoji, regressed);
 
     let coveragePercentage = `${formatCoverage(overallCoverage)}`;
 
@@ -253,13 +260,15 @@ function getOverallTable(
   minCoverage: MinCoverage,
   emoji: Emoji,
   baseOverallPercentage: number | undefined,
-  overallDrop: number | undefined
+  overallDrop: number | undefined,
+  projectHasRegression: boolean = false
 ): string {
   const overallStatus = getStatus(
     overall.percentage,
     null,
     minCoverage.overall,
-    emoji
+    emoji,
+    projectHasRegression
   )
 
   let coveragePercentage = `${formatCoverage(overall.percentage)}`
@@ -285,7 +294,8 @@ function getOverallTable(
       changedLinesPercentage,
       null,
       minCoverage.changed,
-      emoji
+      emoji,
+      projectHasRegression
     )
     changedCoverageRow =
       '\n' +
@@ -320,8 +330,14 @@ function getStatus(
   coverage: number | null,
   baseDiff: number | null,
   minCoverage: number,
-  emoji: Emoji
+  emoji: Emoji,
+  regressed: boolean = false
 ): string {
+  // If our gate says this row is a regression, force fail regardless of
+  // the coverage/threshold heuristics — those don't know about
+  // new-uncovered/file-dropped regressions and would otherwise show 🟢
+  // on a row the gate just failed on.
+  if (regressed) return emoji.fail;
   let status = emoji.pass;
   if (baseDiff !== null) {
     if (baseDiff < 0) status = emoji.fail;
