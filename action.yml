@@ -68,6 +68,15 @@ inputs:
     description: 'Fail when a new source file is added with zero covered lines.'
     required: false
     default: 'true'
+  fail-on-overall-drop:
+    description: |
+      Fail when overall project coverage drops by more than max-overall-drop.
+      Default false because aggregate totals can swing for reasons outside the
+      PR (baseline freshness, partial test execution on base branch, build
+      cache state). Per-file gates already catch the cases this is meant to.
+      The overall delta is still surfaced in the comment for visibility.
+    required: false
+    default: 'false'
   request-changes-on-regression:
     description: 'Submit a REQUEST_CHANGES review on the PR when a regression is detected.'
     required: false

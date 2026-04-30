@@ -52,6 +52,9 @@ export async function action(): Promise<void> {
     const failOnUncoveredNewFile = parseBooleans(
       core.getInput('fail-on-uncovered-new-file') || 'true'
     )
+    const failOnOverallDrop = parseBooleans(
+      core.getInput('fail-on-overall-drop') || 'false'
+    )
     const requestChangesOnRegression = parseBooleans(
       core.getInput('request-changes-on-regression') || 'true'
     )
@@ -59,6 +62,7 @@ export async function action(): Promise<void> {
       fileDrop: maxFileDrop,
       overallDrop: maxOverallDrop,
       failOnUncoveredNewFile,
+      failOnOverallDrop,
     }
 
     const event = github.context.eventName

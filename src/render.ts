@@ -53,9 +53,15 @@ function renderBody(
 function renderSummary(project: Project, emoji: Emoji): string {
   const regressions = project.regressions ?? []
   const noBaseline = project.hasBaseline === false
+  // Informational: overall coverage decreased meaningfully but the gate
+  // is configured not to block on overall-drop. We still surface it so
+  // reviewers know to look — they just won't be forced to block merge
+  // on a number that can swing for reasons outside this PR.
+  const overallDropInfo =
+    project.overallDrop !== undefined &&
+    project.overallDrop > 0.5 &&
+    !regressions.some(r => r.type === 'overall-drop')
 
-  // Build the regression line first (works with or without baseline —
-  // new-uncovered is detected from the PR diff alone).
   let regressionLine = ''
   if (regressions.length === 0) {
     regressionLine = `${emoji.pass} **No coverage regression detected for changed files.**`
@@ -70,14 +76,20 @@ function renderSummary(project: Project, emoji: Emoji): string {
     regressionLine = `${emoji.fail} **Coverage regression detected:** ${parts.join(', ')}.`
   }
 
+  const lines: string[] = []
   if (noBaseline) {
-    return [
-      `⚠️ **Baseline coverage unavailable** — file-drop and overall-drop checks were skipped this run. New uncovered files are still gated below.`,
-      regressionLine,
-      '',
-    ].join('\n')
+    lines.push(
+      `⚠️ **Baseline coverage unavailable** — file-drop and overall-drop checks were skipped this run. New uncovered files are still gated below.`
+    )
   }
-  return `${regressionLine}\n`
+  lines.push(regressionLine)
+  if (overallDropInfo) {
+    lines.push(
+      `ℹ️ Overall project coverage dropped by ${formatCoverage(project.overallDrop ?? 0)} (informational only — overall-drop is not a blocking gate).`
+    )
+  }
+  lines.push('')
+  return lines.join('\n')
 }
 
 function renderRegressions(project: Project): string {

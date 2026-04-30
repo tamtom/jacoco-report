@@ -73,11 +73,13 @@ async function action() {
         const maxOverallDrop = parseFloat(core.getInput('max-overall-drop') || '1.0');
         const maxFileDrop = parseFloat(core.getInput('max-file-drop') || '1.0');
         const failOnUncoveredNewFile = (0, processors_1.parseBooleans)(core.getInput('fail-on-uncovered-new-file') || 'true');
+        const failOnOverallDrop = (0, processors_1.parseBooleans)(core.getInput('fail-on-overall-drop') || 'false');
         const requestChangesOnRegression = (0, processors_1.parseBooleans)(core.getInput('request-changes-on-regression') || 'true');
         const thresholds = {
             fileDrop: maxFileDrop,
             overallDrop: maxOverallDrop,
             failOnUncoveredNewFile,
+            failOnOverallDrop,
         };
         const event = github.context.eventName;
         core.info(`Event is ${event}`);
@@ -389,6 +391,7 @@ function getProjectCoverage(reports, changedFiles, baseCoverage, baseOverall, th
     fileDrop: 1.0,
     overallDrop: 1.0,
     failOnUncoveredNewFile: true,
+    failOnOverallDrop: false,
 }) {
     // We need a baseline to reason about regressions. If the base coverage
     // artifact failed to download (e.g. develop's post-merge run hasn't
@@ -453,7 +456,11 @@ function getProjectCoverage(reports, changedFiles, baseCoverage, baseOverall, th
     if (hasBaseline && baseOverall && projectCoverage) {
         baseOverallPercentage = baseOverall.percentage;
         overallDrop = toFloat(baseOverall.percentage - projectCoverage.percentage);
-        if (overallDrop > thresholds.overallDrop) {
+        // Only treat overall-drop as a *blocking* regression when explicitly
+        // opted in. The render layer still surfaces the delta in the overall
+        // table either way — this only controls whether it adds to the
+        // regressions array (which drives setFailed + REQUEST_CHANGES).
+        if (overallDrop > thresholds.overallDrop && thresholds.failOnOverallDrop) {
             regressions.push({
                 type: 'overall-drop',
                 module: 'project',
@@ -802,8 +809,13 @@ function renderBody(project, minCoverage, emoji) {
 function renderSummary(project, emoji) {
     const regressions = project.regressions ?? [];
     const noBaseline = project.hasBaseline === false;
-    // Build the regression line first (works with or without baseline —
-    // new-uncovered is detected from the PR diff alone).
+    // Informational: overall coverage decreased meaningfully but the gate
+    // is configured not to block on overall-drop. We still surface it so
+    // reviewers know to look — they just won't be forced to block merge
+    // on a number that can swing for reasons outside this PR.
+    const overallDropInfo = project.overallDrop !== undefined &&
+        project.overallDrop > 0.5 &&
+        !regressions.some(r => r.type === 'overall-drop');
     let regressionLine = '';
     if (regressions.length === 0) {
         regressionLine = `${emoji.pass} **No coverage regression detected for changed files.**`;
@@ -821,14 +833,16 @@ function renderSummary(project, emoji) {
             parts.push(`overall coverage drop`);
         regressionLine = `${emoji.fail} **Coverage regression detected:** ${parts.join(', ')}.`;
     }
+    const lines = [];
     if (noBaseline) {
-        return [
-            `⚠️ **Baseline coverage unavailable** — file-drop and overall-drop checks were skipped this run. New uncovered files are still gated below.`,
-            regressionLine,
-            '',
-        ].join('\n');
+        lines.push(`⚠️ **Baseline coverage unavailable** — file-drop and overall-drop checks were skipped this run. New uncovered files are still gated below.`);
     }
-    return `${regressionLine}\n`;
+    lines.push(regressionLine);
+    if (overallDropInfo) {
+        lines.push(`ℹ️ Overall project coverage dropped by ${formatCoverage(project.overallDrop ?? 0)} (informational only — overall-drop is not a blocking gate).`);
+    }
+    lines.push('');
+    return lines.join('\n');
 }
 function renderRegressions(project) {
     if ((project.regressions ?? []).length === 0)

@@ -13,6 +13,7 @@ export function getProjectCoverage(
     fileDrop: 1.0,
     overallDrop: 1.0,
     failOnUncoveredNewFile: true,
+    failOnOverallDrop: false,
   }
 ): Project & { hasCoverageRegression: boolean } {
   // We need a baseline to reason about regressions. If the base coverage
@@ -85,7 +86,11 @@ export function getProjectCoverage(
   if (hasBaseline && baseOverall && projectCoverage) {
     baseOverallPercentage = baseOverall.percentage;
     overallDrop = toFloat(baseOverall.percentage - projectCoverage.percentage);
-    if (overallDrop > thresholds.overallDrop) {
+    // Only treat overall-drop as a *blocking* regression when explicitly
+    // opted in. The render layer still surfaces the delta in the overall
+    // table either way — this only controls whether it adds to the
+    // regressions array (which drives setFailed + REQUEST_CHANGES).
+    if (overallDrop > thresholds.overallDrop && thresholds.failOnOverallDrop) {
       regressions.push({
         type: 'overall-drop',
         module: 'project',
