@@ -125,7 +125,7 @@ function getModuleTable(
 ): string {
   // Skip modules with no regressed/new files — keeps the comment focused.
   const regressedModules = modules.filter(m =>
-    m.files.some(f => f.isRegressed || f.isNew)
+    m.files.some(f => f.isRegressed ?? f.isNew)
   )
   if (regressedModules.length === 0) return ''
 
@@ -186,7 +186,7 @@ function getFileTable(
   for (const module of project.modules) {
     const visibleFiles = noBaseline
       ? module.files
-      : module.files.filter(f => f.isRegressed || f.isNew);
+      : module.files.filter(f => f.isRegressed ?? f.isNew);
     if (visibleFiles.length === 0) continue;
 
     for (let index = 0; index < visibleFiles.length; index++) {
@@ -233,7 +233,7 @@ function getFileTable(
   ): void {
     const status = getStatus(changedCoverage, baseDiff, minCoverage.changed, emoji, regressed);
 
-    let coveragePercentage = `${formatCoverage(overallCoverage)}`;
+    const coveragePercentage = `${formatCoverage(overallCoverage)}`;
 
     let diffText: string;
     if (isNew) {
@@ -273,7 +273,7 @@ function getOverallTable(
   emoji: Emoji,
   baseOverallPercentage: number | undefined,
   overallDrop: number | undefined,
-  projectHasRegression: boolean = false
+  projectHasRegression = false
 ): string {
   const overallStatus = getStatus(
     overall.percentage,
@@ -343,7 +343,7 @@ function getStatus(
   baseDiff: number | null,
   minCoverage: number,
   emoji: Emoji,
-  regressed: boolean = false
+  regressed = false
 ): string {
   // If our gate says this row is a regression, force fail regardless of
   // the coverage/threshold heuristics — those don't know about

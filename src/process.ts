@@ -2,7 +2,6 @@ import {getFilesWithCoverage} from './util'
 import {ChangedFile} from './models/github'
 import {Coverage, File, Line, Module, Project, Regression, RegressionThresholds} from './models/project'
 import {Counter, Group, Package, Report} from './models/jacoco-types'
-import * as core from '@actions/core'
 import * as github from '@actions/github'
 export function getProjectCoverage(
   reports: Report[],
@@ -141,7 +140,6 @@ function generateGitHubFileUrl(fileName: string, packageName: string, changedFil
   
   if (sameExtensionFile) {
     // Use the directory structure from a file with the same extension
-    const basePath = sameExtensionFile.filePath.split('/').slice(0, -1).join('/');
     const packagePath = packageName.replace(/\./g, '/');
     
     // Try to match the package structure
@@ -216,7 +214,7 @@ function getFileCoverageFromPackages(
   files: ChangedFile[],
   baseCoverage?: Map<string, Coverage>,
   thresholds?: RegressionThresholds,
-  hasBaseline: boolean = true
+  hasBaseline = true
 ): File[] {
   const resultFiles: File[] = [];
   const jacocoFiles = getFilesWithCoverage(packages);
@@ -244,7 +242,7 @@ function getFileCoverageFromPackages(
     let baseCoverageInfo: Coverage | undefined = undefined;
     if (baseCoverage) {
       const fullKey = `${packageName}/${name}`;
-      baseCoverageInfo = baseCoverage.get(fullKey) || baseCoverage.get(name);
+      baseCoverageInfo = baseCoverage.get(fullKey) ?? baseCoverage.get(name);
     }
 
     const instruction = jacocoFile.counters.find(c => c.name === 'instruction');

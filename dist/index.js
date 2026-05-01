@@ -63,7 +63,6 @@ async function action() {
         const minCoverageOverall = parseFloat(core.getInput('min-coverage-overall'));
         const minCoverageChangedFiles = parseFloat(core.getInput('min-coverage-changed-files'));
         const title = core.getInput('title');
-        const updateComment = (0, processors_1.parseBooleans)(core.getInput('update-comment'));
         const skipIfNoChanges = (0, processors_1.parseBooleans)(core.getInput('skip-if-no-changes'));
         const passEmoji = core.getInput('pass-emoji');
         const failEmoji = core.getInput('fail-emoji');
@@ -504,7 +503,6 @@ function generateGitHubFileUrl(fileName, packageName, changedFiles) {
     });
     if (sameExtensionFile) {
         // Use the directory structure from a file with the same extension
-        const basePath = sameExtensionFile.filePath.split('/').slice(0, -1).join('/');
         const packagePath = packageName.replace(/\./g, '/');
         // Try to match the package structure
         if (sameExtensionFile.filePath.includes(packagePath)) {
@@ -593,7 +591,7 @@ function getFileCoverageFromPackages(packages, files, baseCoverage, thresholds, 
         let baseCoverageInfo = undefined;
         if (baseCoverage) {
             const fullKey = `${packageName}/${name}`;
-            baseCoverageInfo = baseCoverage.get(fullKey) || baseCoverage.get(name);
+            baseCoverageInfo = baseCoverage.get(fullKey) ?? baseCoverage.get(name);
         }
         const instruction = jacocoFile.counters.find(c => c.name === 'instruction');
         if (!instruction)
@@ -872,7 +870,7 @@ function formatRegressionRow(r) {
 }
 function getModuleTable(modules, minCoverage, emoji) {
     // Skip modules with no regressed/new files — keeps the comment focused.
-    const regressedModules = modules.filter(m => m.files.some(f => f.isRegressed || f.isNew));
+    const regressedModules = modules.filter(m => m.files.some(f => f.isRegressed ?? f.isNew));
     if (regressedModules.length === 0)
         return '';
     const tableHeader = '|Module|Coverage||';
@@ -910,7 +908,7 @@ function getFileTable(project, minCoverage, emoji) {
     for (const module of project.modules) {
         const visibleFiles = noBaseline
             ? module.files
-            : module.files.filter(f => f.isRegressed || f.isNew);
+            : module.files.filter(f => f.isRegressed ?? f.isNew);
         if (visibleFiles.length === 0)
             continue;
         for (let index = 0; index < visibleFiles.length; index++) {
@@ -935,7 +933,7 @@ function getFileTable(project, minCoverage, emoji) {
         : table;
     function renderRow(moduleName, fileName, overallCoverage, baseDiff, changedCoverage, isMultiModule, isNew, regressed) {
         const status = getStatus(changedCoverage, baseDiff, minCoverage.changed, emoji, regressed);
-        let coveragePercentage = `${formatCoverage(overallCoverage)}`;
+        const coveragePercentage = `${formatCoverage(overallCoverage)}`;
         let diffText;
         if (isNew) {
             diffText = '**`NEW`**';
@@ -1274,7 +1272,7 @@ async function parseBaseReport(basePath, debugMode) {
         if (debugMode)
             core.info(`Successfully parsed base report`);
         // Get all packages from the report
-        const packages = report.package || [];
+        const packages = report.package ?? [];
         // Also check packages in groups
         if (report.group) {
             for (const group of report.group) {

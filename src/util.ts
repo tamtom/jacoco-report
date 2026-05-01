@@ -194,7 +194,7 @@ export async function parseBaseReport(
     if (debugMode) core.info(`Successfully parsed base report`);
 
     // Get all packages from the report
-    const packages = report.package || [];
+    const packages = report.package ?? [];
 
     // Also check packages in groups
     if (report.group) {

@@ -38,7 +38,6 @@ export async function action(): Promise<void> {
       core.getInput('min-coverage-changed-files')
     )
     const title = core.getInput('title')
-    const updateComment = parseBooleans(core.getInput('update-comment'))
     const skipIfNoChanges = parseBooleans(core.getInput('skip-if-no-changes'))
     const passEmoji = core.getInput('pass-emoji')
     const failEmoji = core.getInput('fail-emoji')
