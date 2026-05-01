@@ -56,12 +56,41 @@ inputs:
     description: 'Run the action in debug mode and get debug logs printed in console'
     required: false
     default: 'false'
+  max-overall-drop:
+    description: 'Maximum allowed drop in overall project coverage vs base (percentage points). 0 disables.'
+    required: false
+    default: '1.0'
+  max-file-drop:
+    description: 'Maximum allowed drop in a single changed file vs base (percentage points). 0 disables.'
+    required: false
+    default: '1.0'
+  fail-on-uncovered-new-file:
+    description: 'Fail when a new source file is added with zero covered lines.'
+    required: false
+    default: 'true'
+  fail-on-overall-drop:
+    description: |
+      Fail when overall project coverage drops by more than max-overall-drop.
+      Default false because aggregate totals can swing for reasons outside the
+      PR (baseline freshness, partial test execution on base branch, build
+      cache state). Per-file gates already catch the cases this is meant to.
+      The overall delta is still surfaced in the comment for visibility.
+    required: false
+    default: 'false'
+  request-changes-on-regression:
+    description: 'Submit a REQUEST_CHANGES review on the PR when a regression is detected.'
+    required: false
+    default: 'true'
 
 outputs:
   coverage-overall:
     description: 'The overall coverage of the project'
   coverage-changed-files:
     description: 'The total coverage of all changed files'
+  coverage-regressed:
+    description: 'true if any regression was detected (new uncovered file, file drop, or overall drop)'
+  regression-summary:
+    description: 'Short multi-line summary of regressions, suitable for logs or comments'
 
 runs:
   using: 'node20'

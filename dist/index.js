@@ -63,27 +63,26 @@ async function action() {
         const minCoverageOverall = parseFloat(core.getInput('min-coverage-overall'));
         const minCoverageChangedFiles = parseFloat(core.getInput('min-coverage-changed-files'));
         const title = core.getInput('title');
-        const updateComment = (0, processors_1.parseBooleans)(core.getInput('update-comment'));
-        if (updateComment) {
-            if (!title) {
-                core.info("'title' is not set. 'update-comment' does not work without 'title'");
-            }
-        }
         const skipIfNoChanges = (0, processors_1.parseBooleans)(core.getInput('skip-if-no-changes'));
         const passEmoji = core.getInput('pass-emoji');
         const failEmoji = core.getInput('fail-emoji');
         continueOnError = (0, processors_1.parseBooleans)(core.getInput('continue-on-error'));
         const debugMode = (0, processors_1.parseBooleans)(core.getInput('debug-mode'));
+        // Regression gating thresholds
+        const maxOverallDrop = parseFloat(core.getInput('max-overall-drop') || '1.0');
+        const maxFileDrop = parseFloat(core.getInput('max-file-drop') || '1.0');
+        const failOnUncoveredNewFile = (0, processors_1.parseBooleans)(core.getInput('fail-on-uncovered-new-file') || 'true');
+        const failOnOverallDrop = (0, processors_1.parseBooleans)(core.getInput('fail-on-overall-drop') || 'false');
+        const requestChangesOnRegression = (0, processors_1.parseBooleans)(core.getInput('request-changes-on-regression') || 'true');
+        const thresholds = {
+            fileDrop: maxFileDrop,
+            overallDrop: maxOverallDrop,
+            failOnUncoveredNewFile,
+            failOnOverallDrop,
+        };
         const event = github.context.eventName;
         core.info(`Event is ${event}`);
-        if (debugMode) {
-            core.info(`passEmoji: ${passEmoji}`);
-            core.info(`failEmoji: ${failEmoji}`);
-        }
         const commentType = core.getInput('comment-type');
-        if (debugMode) {
-            core.info(`commentType: ${commentType}`);
-        }
         if (!isValidCommentType(commentType)) {
             core.setFailed(`'comment-type' ${commentType} is invalid`);
         }
@@ -130,55 +129,69 @@ async function action() {
         core.info(`head sha: ${head}`);
         if (debugMode)
             core.info(`reportPaths: ${reportPaths}`);
-        const baseCoverage = basePath ?
-            await (0, util_2.parseBaseReport)(basePath, debugMode) :
-            undefined;
-        if (debugMode && baseCoverage) {
-            core.info(`Base coverage map contains ${baseCoverage.size} entries`);
+        const baseReport = basePath
+            ? await (0, util_2.parseBaseReport)(basePath, debugMode)
+            : { files: undefined, overall: null };
+        if (debugMode && baseReport.files) {
+            core.info(`Base coverage map contains ${baseReport.files.size} entries`);
         }
-        const changedFiles = await getChangedFiles(base, head, client, debugMode);
+        const changedFiles = await getChangedFiles(client, debugMode);
         if (debugMode)
             core.info(`changedFiles: ${(0, util_1.debug)(changedFiles)}`);
-        const reportsJsonAsync = getJsonReports(reportPaths, debugMode);
-        const reports = await reportsJsonAsync;
-        // Pass baseCoverage to getProjectCoverage
-        const project = (0, process_1.getProjectCoverage)(reports, changedFiles, baseCoverage);
+        const reports = await getJsonReports(reportPaths, debugMode);
+        const project = (0, process_1.getProjectCoverage)(reports, changedFiles, baseReport.files, baseReport.overall, thresholds);
         if (debugMode)
             core.info(`project: ${(0, util_1.debug)(project)}`);
         core.setOutput('coverage-overall', project.overall ? parseFloat(project.overall.percentage.toFixed(2)) : 100);
         core.setOutput('coverage-changed-files', parseFloat(project['coverage-changed-files'].toFixed(2)));
+        core.setOutput('coverage-regressed', String((project.regressions ?? []).length > 0));
+        core.setOutput('regression-summary', (project.regressions ?? []).length === 0
+            ? ''
+            : (project.regressions ?? [])
+                .map(r => `${r.type} | ${r.module} | ${r.file ?? ''} | drop=${r.drop ?? 'n/a'}`)
+                .join('\n'));
         const skip = skipIfNoChanges && project.modules.length === 0;
         if (debugMode)
             core.info(`skip: ${skip}`);
         if (debugMode)
             core.info(`prNumber: ${prNumber}`);
         if (!skip) {
-            const emoji = {
-                pass: passEmoji,
-                fail: failEmoji,
-            };
+            const emoji = { pass: passEmoji, fail: failEmoji };
             const titleFormatted = (0, render_1.getTitle)(title);
-            const bodyFormatted = (0, render_1.getPRComment)(project, {
-                overall: minCoverageOverall,
-                changed: minCoverageChangedFiles,
-            }, title, emoji);
+            const bodyFormatted = (0, render_1.getPRComment)(project, { overall: minCoverageOverall, changed: minCoverageChangedFiles }, title, emoji);
             switch (commentType) {
                 case 'pr_comment':
-                    await addComment(prNumber, updateComment, titleFormatted, bodyFormatted, client, debugMode);
+                    await upsertComment(prNumber, titleFormatted, bodyFormatted, client, debugMode);
                     break;
                 case 'summary':
                     await addWorkflowSummary(bodyFormatted);
                     break;
                 case 'both':
-                    await addComment(prNumber, updateComment, titleFormatted, bodyFormatted, client, debugMode);
+                    await upsertComment(prNumber, titleFormatted, bodyFormatted, client, debugMode);
                     await addWorkflowSummary(bodyFormatted);
                     break;
             }
         }
-        // Check for coverage regression AFTER posting the comment
-        if (project.hasCoverageRegression) {
-            core.warning('Code coverage has decreased in one or more files.');
-            core.setFailed('Code coverage regression detected.');
+        // Submit / dismiss REQUEST_CHANGES review based on regression state
+        if (requestChangesOnRegression && prNumber !== undefined) {
+            try {
+                if ((project.regressions ?? []).length > 0) {
+                    await submitRequestChangesReview(client, prNumber, project, debugMode);
+                }
+                else {
+                    await dismissPriorRegressionReviews(client, prNumber, debugMode);
+                }
+            }
+            catch (e) {
+                core.warning(`Could not submit/dismiss review: ${e}`);
+            }
+        }
+        if ((project.regressions ?? []).length > 0) {
+            const reasons = (project.regressions ?? [])
+                .map(r => `${r.type}: ${r.module}${r.file ? `/${r.file}` : ''}`)
+                .join('; ');
+            core.warning(`Coverage regression detected. ${reasons}`);
+            core.setFailed(`Coverage regression detected. ${reasons}`);
         }
     }
     catch (error) {
@@ -196,88 +209,133 @@ async function getJsonReports(xmlPaths, debugMode) {
     const globber = await glob.create(xmlPaths.join('\n'));
     const files = await globber.glob();
     if (debugMode)
-        core.info(`Resolved filesV2: ${files}`);
+        core.info(`Resolved files: ${files}`);
     return Promise.all(files.map(async (path) => {
         const reportXml = await fs.promises.readFile(path.trim(), 'utf-8');
         return await (0, util_1.parseToReport)(reportXml);
     }));
 }
-async function getJsonReport(xmlPath, debugMode) {
-    if (debugMode)
-        core.info(`getJsonReport xmlPath: ${xmlPath}`);
-    const reportXml = await fs.promises.readFile(xmlPath, 'utf-8');
-    return await (0, util_1.parseToReport)(reportXml);
-}
-async function getChangedFiles(base, head, client, debugMode) {
+async function getChangedFiles(client, debugMode) {
     const prNumber = github.context.payload.pull_request?.number;
-    // Check if prNumber exists
     if (!prNumber) {
-        core.warning("Pull request number not found. Cannot fetch changed files.");
+        core.warning('Pull request number not found. Cannot fetch changed files.');
         return [];
     }
-    const response = await client.rest.pulls.listFiles({
+    // Paginate so PRs with > 30 files don't lose entries.
+    const files = await client.paginate(client.rest.pulls.listFiles, {
         owner: github.context.repo.owner,
         repo: github.context.repo.repo,
         pull_number: prNumber,
+        per_page: 100,
     });
     const changedFiles = [];
-    const files = response.data ?? [];
     for (const file of files) {
         if (debugMode)
             core.info(`file: ${(0, util_1.debug)(file)}`);
-        const changedFile = {
+        changedFiles.push({
             filePath: file.filename,
             url: file.blob_url,
             lines: (0, util_1.getChangedLines)(file.patch),
-        };
-        changedFiles.push(changedFile);
+            status: file.status,
+            previousFilePath: file.previous_filename,
+        });
     }
     return changedFiles;
 }
-async function addComment(prNumber, update, title, body, client, debugMode) {
+async function upsertComment(prNumber, title, body, client, debugMode) {
     if (prNumber === undefined) {
         if (debugMode)
-            core.info('prNumber not present');
+            core.info('prNumber not present, skipping comment');
         return;
     }
-    let commentUpdated = false;
-    if (debugMode)
-        core.info(`update: ${update}`);
-    if (debugMode)
-        core.info(`title: ${title}`);
-    if (debugMode)
-        core.info(`JaCoCo Comment: ${body}`);
-    if (update && title) {
+    // Paginate ALL issue comments (not just first page) and find ours via the
+    // hidden HTML marker. Title-prefix matching is brittle on long PRs and was
+    // the cause of "comment doesn't update on later commits".
+    const comments = await client.paginate(client.rest.issues.listComments, {
+        owner: github.context.repo.owner,
+        repo: github.context.repo.repo,
+        issue_number: prNumber,
+        per_page: 100,
+    });
+    const existing = comments.find((c) => typeof c.body === 'string' && c.body.includes(render_1.COMMENT_MARKER));
+    if (existing) {
         if (debugMode)
-            core.info('Listing all comments');
-        const comments = await client.rest.issues.listComments({
-            issue_number: prNumber,
-            ...github.context.repo,
-        });
-        const comment = comments.data.find((it) => it.body.startsWith(title));
-        if (comment) {
-            if (debugMode)
-                core.info(`Updating existing comment: id=${comment.id} \n body=${comment.body}`);
-            await client.rest.issues.updateComment({
-                comment_id: comment.id,
-                body,
-                ...github.context.repo,
-            });
-            commentUpdated = true;
-        }
-    }
-    if (!commentUpdated) {
-        if (debugMode)
-            core.info('Creating a new comment');
-        await client.rest.issues.createComment({
-            issue_number: prNumber,
+            core.info(`Updating existing coverage comment id=${existing.id}`);
+        await client.rest.issues.updateComment({
+            owner: github.context.repo.owner,
+            repo: github.context.repo.repo,
+            comment_id: existing.id,
             body,
-            ...github.context.repo,
         });
+        return;
     }
+    if (debugMode)
+        core.info('Creating new coverage comment');
+    await client.rest.issues.createComment({
+        owner: github.context.repo.owner,
+        repo: github.context.repo.repo,
+        issue_number: prNumber,
+        body,
+    });
 }
 async function addWorkflowSummary(body) {
     await core.summary.addRaw(body, true).write();
+}
+const REVIEW_MARKER = '<!-- jacoco-coverage-review -->';
+async function submitRequestChangesReview(client, prNumber, project, debugMode) {
+    // Don't stack reviews — if our last bot review already requests changes, refresh its body via comment instead.
+    const reviews = await client.paginate(client.rest.pulls.listReviews, {
+        owner: github.context.repo.owner,
+        repo: github.context.repo.repo,
+        pull_number: prNumber,
+        per_page: 100,
+    });
+    const ourReviews = reviews.filter((r) => typeof r.body === 'string' && r.body.includes(REVIEW_MARKER));
+    const lastOpenChangeRequest = [...ourReviews]
+        .reverse()
+        .find((r) => r.state === 'CHANGES_REQUESTED');
+    const body = `${REVIEW_MARKER}\n${(0, render_1.getRegressionReviewBody)(project)}`;
+    if (lastOpenChangeRequest) {
+        if (debugMode)
+            core.info('Existing CHANGES_REQUESTED review present; not stacking another');
+        return;
+    }
+    if (debugMode)
+        core.info('Submitting REQUEST_CHANGES review');
+    await client.rest.pulls.createReview({
+        owner: github.context.repo.owner,
+        repo: github.context.repo.repo,
+        pull_number: prNumber,
+        event: 'REQUEST_CHANGES',
+        body,
+    });
+}
+async function dismissPriorRegressionReviews(client, prNumber, debugMode) {
+    const reviews = await client.paginate(client.rest.pulls.listReviews, {
+        owner: github.context.repo.owner,
+        repo: github.context.repo.repo,
+        pull_number: prNumber,
+        per_page: 100,
+    });
+    const ours = reviews.filter((r) => typeof r.body === 'string' &&
+        r.body.includes(REVIEW_MARKER) &&
+        r.state === 'CHANGES_REQUESTED');
+    for (const r of ours) {
+        if (debugMode)
+            core.info(`Dismissing prior bot review id=${r.id}`);
+        try {
+            await client.rest.pulls.dismissReview({
+                owner: github.context.repo.owner,
+                repo: github.context.repo.repo,
+                pull_number: prNumber,
+                review_id: r.id,
+                message: 'Coverage regression resolved.',
+            });
+        }
+        catch (e) {
+            core.warning(`Failed to dismiss review ${r.id}: ${e}`);
+        }
+    }
 }
 const validCommentTypes = ['pr_comment', 'summary', 'both'];
 const isValidCommentType = (value) => {
@@ -327,16 +385,25 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.getProjectCoverage = getProjectCoverage;
 exports.calculatePercentage = calculatePercentage;
 const util_1 = __nccwpck_require__(9685);
-const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
-function getProjectCoverage(reports, changedFiles, baseCoverage) {
+function getProjectCoverage(reports, changedFiles, baseCoverage, baseOverall, thresholds = {
+    fileDrop: 1.0,
+    overallDrop: 1.0,
+    failOnUncoveredNewFile: true,
+    failOnOverallDrop: false,
+}) {
+    // We need a baseline to reason about regressions. If the base coverage
+    // artifact failed to download (e.g. develop's post-merge run hasn't
+    // produced one yet), every file in the PR will look 'new' which would
+    // flood false positives. Detect that and skip regression gating
+    // entirely for this run — the comment will say so explicitly.
+    const hasBaseline = (baseCoverage !== undefined && baseCoverage.size > 0) || baseOverall != null;
     const moduleCoverages = [];
     const modules = getModulesFromReports(reports);
     for (const module of modules) {
-        // Pass baseCoverage to getFileCoverageFromPackages
-        const files = getFileCoverageFromPackages(module.packages, changedFiles, baseCoverage);
+        const files = getFileCoverageFromPackages(module.packages, changedFiles, baseCoverage, thresholds, hasBaseline);
         if (files.length !== 0) {
-            const moduleCoverage = getModuleCoverage(module.root);
+            const moduleCoverage = getModuleCoverage(module.packages);
             const changedCoverage = getCoverage(files);
             moduleCoverages.push({
                 name: module.name,
@@ -350,23 +417,57 @@ function getProjectCoverage(reports, changedFiles, baseCoverage) {
             });
         }
     }
-    // Rest of the function remains the same
     moduleCoverages.sort((a, b) => b.overall.percentage - a.overall.percentage);
     const totalFiles = moduleCoverages.flatMap(module => module.files);
     const changedCoverage = getCoverage(moduleCoverages);
     const projectCoverage = getOverallProjectCoverage(reports);
     const totalPercentage = getTotalPercentage(totalFiles);
-    let hasCoverageRegression = false;
+    // Build structured regression list
+    const regressions = [];
     for (const module of moduleCoverages) {
         for (const file of module.files) {
-            const baseDiff = file.changed?.baseDiff;
-            if (baseDiff !== undefined && baseDiff !== null && baseDiff < -0.5) {
-                hasCoverageRegression = true;
-                break;
+            if (file.regressionReason === 'new-uncovered') {
+                regressions.push({
+                    type: 'new-uncovered',
+                    module: module.name,
+                    file: file.name,
+                    fileUrl: file.url,
+                    currentPercentage: file.overall.percentage,
+                });
+            }
+            else if (file.regressionReason === 'file-dropped') {
+                regressions.push({
+                    type: 'file-dropped',
+                    module: module.name,
+                    file: file.name,
+                    fileUrl: file.url,
+                    basePercentage: file.basePercentage,
+                    currentPercentage: file.overall.percentage,
+                    drop: file.basePercentage !== undefined
+                        ? toFloat(file.basePercentage - file.overall.percentage)
+                        : undefined,
+                });
             }
         }
-        if (hasCoverageRegression)
-            break;
+    }
+    let overallDrop;
+    let baseOverallPercentage;
+    if (hasBaseline && baseOverall && projectCoverage) {
+        baseOverallPercentage = baseOverall.percentage;
+        overallDrop = toFloat(baseOverall.percentage - projectCoverage.percentage);
+        // Only treat overall-drop as a *blocking* regression when explicitly
+        // opted in. The render layer still surfaces the delta in the overall
+        // table either way — this only controls whether it adds to the
+        // regressions array (which drives setFailed + REQUEST_CHANGES).
+        if (overallDrop > thresholds.overallDrop && thresholds.failOnOverallDrop) {
+            regressions.push({
+                type: 'overall-drop',
+                module: 'project',
+                basePercentage: baseOverall.percentage,
+                currentPercentage: projectCoverage.percentage,
+                drop: overallDrop,
+            });
+        }
     }
     return {
         modules: moduleCoverages,
@@ -374,190 +475,198 @@ function getProjectCoverage(reports, changedFiles, baseCoverage) {
         overall: projectCoverage,
         changed: changedCoverage,
         'coverage-changed-files': totalPercentage ?? 100,
-        hasCoverageRegression
+        baseOverallPercentage,
+        overallDrop,
+        regressions,
+        hasBaseline,
+        hasCoverageRegression: regressions.length > 0,
     };
 }
 function toFloat(value) {
     return parseFloat(value.toFixed(2));
 }
-function generateGitHubFileUrl(fileName, packageName) {
+function generateGitHubFileUrl(fileName, packageName, changedFiles) {
     const { owner, repo } = github.context.repo;
-    const sha = github.context.sha;
-    // Convert package name to path (replace dots with slashes)
+    // Use head SHA from pull request context if available, otherwise fall back to context.sha
+    const sha = github.context.payload.pull_request?.head?.sha || github.context.sha;
+    // First, try to find a similar file path from the changed files to understand the project structure
+    const similarFile = changedFiles.find(f => f.filePath.includes(fileName));
+    if (similarFile) {
+        // Extract the directory structure from the similar file and apply it
+        const filePath = similarFile.filePath;
+        return `https://github.com/${owner}/${repo}/blob/${sha}/${filePath}`;
+    }
+    // If no similar file found, try to find any file with the same extension to understand the project structure
+    const sameExtensionFile = changedFiles.find(f => {
+        const ext = fileName.split('.').pop();
+        return f.filePath.endsWith(`.${ext}`);
+    });
+    if (sameExtensionFile) {
+        // Use the directory structure from a file with the same extension
+        const packagePath = packageName.replace(/\./g, '/');
+        // Try to match the package structure
+        if (sameExtensionFile.filePath.includes(packagePath)) {
+            const pathBeforePackage = sameExtensionFile.filePath.split(packagePath)[0];
+            return `https://github.com/${owner}/${repo}/blob/${sha}/${pathBeforePackage}${packagePath}/${fileName}`;
+        }
+    }
+    // Fallback to basic structure guessing
     const packagePath = packageName.replace(/\./g, '/');
-    // Determine file extension and likely source directory
-    let sourceDir = 'src/main/java';
+    let bestGuessPath;
     if (fileName.endsWith('.kt')) {
-        sourceDir = 'src/main/kotlin';
+        bestGuessPath = `src/main/kotlin/${packagePath}/${fileName}`;
     }
-    else if (fileName.endsWith('.js') || fileName.endsWith('.ts')) {
-        sourceDir = 'src';
+    else if (fileName.endsWith('.java')) {
+        bestGuessPath = `src/main/java/${packagePath}/${fileName}`;
     }
-    // Build the most likely path
-    const filePath = `${sourceDir}/${packagePath}/${fileName}`;
-    return `https://github.com/${owner}/${repo}/blob/${sha}/${filePath}`;
+    else {
+        bestGuessPath = `src/${packagePath}/${fileName}`;
+    }
+    return `https://github.com/${owner}/${repo}/blob/${sha}/${bestGuessPath}`;
 }
+// Bucket packages into modules based on the third segment of their JVM
+// package path (e.g. "com/travel/profile_ui_private/coverage_canary"
+// -> module "profile_ui_private"). This matches the project's existing
+// jacoco_report.py convention and means a single combinedReport.xml
+// surfaces real per-module names instead of a single bucket named after
+// the Gradle root project.
 function getModulesFromReports(reports) {
-    const modules = [];
+    const moduleMap = new Map();
+    const ingest = (parent) => {
+        const packages = parent.package;
+        if (!packages || packages.length === 0)
+            return;
+        for (const pkg of packages) {
+            const moduleName = extractModuleName(pkg.name) ?? parent.name ?? 'unknown';
+            let mod = moduleMap.get(moduleName);
+            if (!mod) {
+                mod = { name: moduleName, packages: [] };
+                moduleMap.set(moduleName, mod);
+            }
+            mod.packages.push(pkg);
+        }
+    };
     for (const report of reports) {
         const groupTag = report.group;
         if (groupTag) {
-            const groups = groupTag.filter(group => group !== undefined);
-            for (const group of groups) {
-                const module = getModuleFromParent(group);
-                if (module) {
-                    modules.push(module);
-                }
+            for (const group of groupTag.filter(g => g !== undefined)) {
+                ingest(group);
             }
         }
-        const module = getModuleFromParent(report);
-        if (module) {
-            modules.push(module);
-        }
+        ingest(report);
     }
-    return modules;
+    return Array.from(moduleMap.values());
 }
-function getModuleFromParent(parent) {
-    const packages = parent.package;
-    if (packages && packages.length !== 0) {
-        return {
-            name: parent.name,
-            packages,
-            root: parent, // TODO just pass array of 'counters'
-        };
-    }
-    return null;
+function extractModuleName(packageName) {
+    if (!packageName)
+        return null;
+    const parts = packageName.split('/');
+    return parts.length >= 3 ? parts[2] : null;
 }
-function getFileCoverageFromPackages(packages, files, baseCoverage) {
+function getFileCoverageFromPackages(packages, files, baseCoverage, thresholds, hasBaseline = true) {
     const resultFiles = [];
     const jacocoFiles = (0, util_1.getFilesWithCoverage)(packages);
+    const fileDropThreshold = thresholds?.fileDrop ?? 1.0;
+    const failOnUncoveredNewFile = thresholds?.failOnUncoveredNewFile ?? true;
     for (const jacocoFile of jacocoFiles) {
         const name = jacocoFile.name;
         const packageName = jacocoFile.packageName;
-        // Flexible matching logic
+        // Match jacoco file against PR-changed files. Only matched files are reported.
         const githubFile = files.find(function (f) {
-            // Original matching logic
-            if (f.filePath.endsWith(`${packageName}/${name}`)) {
+            if (f.filePath.endsWith(`${packageName}/${name}`))
                 return true;
-            }
-            // Additional matching filename
-            // Match files regardless package structure
-            if (f.filePath.endsWith(`/${name}`)) {
+            if (f.filePath.endsWith(`/${name}`))
                 return true;
-            }
-            // Handle package path conversion kotlin files
-            // Convert package dots slashes comparison
             const packagePath = packageName.replace(/\./g, '/');
-            if (f.filePath.includes(packagePath) && f.filePath.endsWith(name)) {
+            if (f.filePath.includes(packagePath) && f.filePath.endsWith(name))
                 return true;
-            }
-            // Kotlin multiplatform, check class name part matches
-            // Extract class name package name (last part dot/slash)
             const className = packageName.split(/[./]/).pop();
-            if (className && f.filePath.includes(className) && f.filePath.endsWith(name)) {
+            if (className && f.filePath.includes(className) && f.filePath.endsWith(name))
                 return true;
-            }
             return false;
         });
-        // Get base coverage available
+        if (!githubFile)
+            continue;
+        // Look up this file's prior coverage on base branch (if any)
         let baseCoverageInfo = undefined;
         if (baseCoverage) {
-            // Try different formats to find match
             const fullKey = `${packageName}/${name}`;
-            baseCoverageInfo = baseCoverage.get(fullKey) || baseCoverage.get(name);
+            baseCoverageInfo = baseCoverage.get(fullKey) ?? baseCoverage.get(name);
         }
-        const instruction = jacocoFile.counters.find(counter => counter.name === 'instruction');
-        if (instruction) {
-            const missed = instruction.missed;
-            const covered = instruction.covered;
-            const currentPercentage = calculatePercentage(covered, missed);
-            // Process changed lines coverage use file-level comparison
-            let changedCoverage = null;
-            let lines = [];
-            if (githubFile) {
-                core.info(`Found matching file: ${name}`);
-                // Standard line-by-line processing
-                for (const lineNumber of githubFile.lines) {
-                    const jacocoLine = jacocoFile.lines.find(line => line.number === lineNumber);
-                    if (jacocoLine) {
-                        const line = {
-                            number: lineNumber,
-                            instruction: {
-                                missed: jacocoLine.instruction.missed,
-                                covered: jacocoLine.instruction.covered,
-                                percentage: calculatePercentage(jacocoLine.instruction.covered, jacocoLine.instruction.missed) ?? 0,
-                            },
-                            branch: {
-                                missed: jacocoLine.branch.missed,
-                                covered: jacocoLine.branch.covered,
-                                percentage: calculatePercentage(jacocoLine.branch.covered, jacocoLine.branch.missed) ?? 0,
-                            },
-                        };
-                        lines.push(line);
-                    }
-                }
-                const changedMissed = lines
-                    .map(line => toFloat(line.instruction.missed))
-                    .reduce(sumReducer, 0.0);
-                const changedCovered = lines
-                    .map(line => toFloat(line.instruction.covered))
-                    .reduce(sumReducer, 0.0);
-                const changedPercentage = calculatePercentage(changedCovered, changedMissed);
-                changedCoverage = changedPercentage !== null ? {
-                    missed: changedMissed,
-                    covered: changedCovered,
-                    percentage: changedPercentage,
-                    // Add base diff base coverage
-                    baseDiff: baseCoverageInfo?.percentage !== undefined && currentPercentage !== null ?
-                        toFloat(currentPercentage - baseCoverageInfo.percentage) : null
-                } : null;
-                const overallCoverage = currentPercentage !== null ? {
-                    missed,
-                    covered,
-                    percentage: currentPercentage
-                } : null;
-                if (overallCoverage) {
-                    resultFiles.push({
-                        name,
-                        url: githubFile?.url || generateGitHubFileUrl(name, packageName),
-                        overall: overallCoverage,
-                        changed: changedCoverage,
-                        lines,
-                        basePercentage: baseCoverageInfo?.percentage
-                    });
-                }
-            }
-            // Also process files with coverage differences
-            else if (baseCoverageInfo && baseCoverageInfo.percentage !== undefined && currentPercentage !== null) {
-                const coverageDiff = toFloat(currentPercentage - baseCoverageInfo.percentage);
-                // Only include file if there's a coverage difference
-                if (coverageDiff !== 0) {
-                    core.info(`Found coverage difference for ${name}: ${coverageDiff}`);
-                    const overallCoverage = {
-                        missed,
-                        covered,
-                        percentage: currentPercentage
-                    };
-                    // Generate proper GitHub URL for the file
-                    const url = generateGitHubFileUrl(name, packageName);
-                    // Set up changedCoverage with baseDiff
-                    const changedCoverage = {
-                        missed: 0,
-                        covered: 0,
-                        percentage: currentPercentage,
-                        baseDiff: coverageDiff
-                    };
-                    resultFiles.push({
-                        name,
-                        url,
-                        overall: overallCoverage,
-                        changed: changedCoverage,
-                        lines: [],
-                        basePercentage: baseCoverageInfo.percentage
-                    });
-                }
+        const instruction = jacocoFile.counters.find(c => c.name === 'instruction');
+        if (!instruction)
+            continue;
+        const missed = instruction.missed;
+        const covered = instruction.covered;
+        const currentPercentage = calculatePercentage(covered, missed);
+        if (currentPercentage === null)
+            continue;
+        // Per-line coverage for the lines actually changed in this PR
+        const lines = [];
+        for (const lineNumber of githubFile.lines) {
+            const jacocoLine = jacocoFile.lines.find(l => l.number === lineNumber);
+            if (jacocoLine) {
+                lines.push({
+                    number: lineNumber,
+                    instruction: {
+                        missed: jacocoLine.instruction.missed,
+                        covered: jacocoLine.instruction.covered,
+                        percentage: calculatePercentage(jacocoLine.instruction.covered, jacocoLine.instruction.missed) ?? 0,
+                    },
+                    branch: {
+                        missed: jacocoLine.branch.missed,
+                        covered: jacocoLine.branch.covered,
+                        percentage: calculatePercentage(jacocoLine.branch.covered, jacocoLine.branch.missed) ?? 0,
+                    },
+                });
             }
         }
+        const changedMissed = lines
+            .map(line => toFloat(line.instruction.missed))
+            .reduce(sumReducer, 0.0);
+        const changedCovered = lines
+            .map(line => toFloat(line.instruction.covered))
+            .reduce(sumReducer, 0.0);
+        const changedPercentage = calculatePercentage(changedCovered, changedMissed);
+        const baseDiff = baseCoverageInfo?.percentage !== undefined
+            ? toFloat(currentPercentage - baseCoverageInfo.percentage)
+            : null;
+        const changedCoverage = changedPercentage !== null ? {
+            missed: changedMissed,
+            covered: changedCovered,
+            percentage: changedPercentage,
+            baseDiff,
+        } : null;
+        const overallCoverage = { missed, covered, percentage: currentPercentage };
+        // GitHub's PR-file status is the authoritative "new file" signal.
+        // Don't infer from missing base coverage — jacoco may not report on
+        // a file (no methods, excluded by config, etc.) which would cause
+        // false positives.
+        const isNew = githubFile.status === 'added';
+        let regressionReason;
+        if (isNew && failOnUncoveredNewFile && covered === 0) {
+            // New uncovered file: gate regardless of baseline presence —
+            // we know from the diff alone that this file was just added.
+            regressionReason = 'new-uncovered';
+        }
+        else if (!isNew &&
+            hasBaseline &&
+            baseDiff !== null &&
+            baseDiff < -fileDropThreshold) {
+            // Existing file that lost coverage: requires a baseline to detect.
+            regressionReason = 'file-dropped';
+        }
+        resultFiles.push({
+            name,
+            url: githubFile?.url || generateGitHubFileUrl(name, packageName, files),
+            overall: overallCoverage,
+            changed: changedCoverage,
+            lines,
+            basePercentage: baseCoverageInfo?.percentage,
+            isNew,
+            isRegressed: regressionReason !== undefined,
+            regressionReason,
+        });
     }
     resultFiles.sort((a, b) => b.overall.percentage - a.overall.percentage);
     return resultFiles;
@@ -585,9 +694,23 @@ function getTotalPercentage(files) {
         return null;
     }
 }
-function getModuleCoverage(report) {
-    const counters = report.counter ?? [];
-    return getDetailedCoverage(counters, 'INSTRUCTION');
+function getModuleCoverage(packages) {
+    let covered = 0;
+    let missed = 0;
+    for (const pkg of packages) {
+        const counter = (pkg.counter ?? []).find(c => c.type === 'INSTRUCTION');
+        if (counter) {
+            covered += counter.covered;
+            missed += counter.missed;
+        }
+    }
+    if (covered + missed === 0)
+        return { covered: 0, missed: 0, percentage: 0 };
+    return {
+        covered,
+        missed,
+        percentage: parseFloat(((covered / (covered + missed)) * 100).toFixed(2)),
+    };
 }
 function getOverallProjectCoverage(reports) {
     const coverages = reports.map(report => {
@@ -652,35 +775,115 @@ function sumReducer(total, value) {
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.COMMENT_MARKER = void 0;
 exports.getPRComment = getPRComment;
 exports.getTitle = getTitle;
-const coverageAbsent = '> There is no coverage information present for the Files changed';
+exports.getRegressionReviewBody = getRegressionReviewBody;
+exports.COMMENT_MARKER = '<!-- jacoco-coverage-comment -->';
+const noChangedCoverage = '> No coverage information present for the files changed in this PR.';
 function getPRComment(project, minCoverage, title, emoji) {
     const heading = getTitle(title);
+    const body = renderBody(project, minCoverage, emoji);
+    return `${exports.COMMENT_MARKER}\n${heading}${body}`;
+}
+function renderBody(project, minCoverage, emoji) {
     if (!project.overall) {
-        return `${heading + coverageAbsent}`;
+        return noChangedCoverage;
     }
-    const overallTable = getOverallTable(project.overall, project.changed, minCoverage, emoji);
+    const summary = renderSummary(project, emoji);
+    const regressionsBlock = renderRegressions(project);
+    const projectHasRegression = (project.regressions ?? []).length > 0;
+    const overallTable = getOverallTable(project.overall, project.changed, minCoverage, emoji, project.baseOverallPercentage, project.overallDrop, projectHasRegression);
     const moduleTable = getModuleTable(project.modules, minCoverage, emoji);
     const filesTable = getFileTable(project, minCoverage, emoji);
-    const tables = project.modules.length === 0
-        ? coverageAbsent
-        : project.isMultiModule
-            ? `${moduleTable}\n\n${filesTable}`
-            : filesTable;
-    return `${heading + overallTable}\n\n${tables}`;
+    if (project.modules.length === 0) {
+        return `${summary}\n\n${overallTable}\n\n${noChangedCoverage}`;
+    }
+    const tables = project.isMultiModule
+        ? `${moduleTable}\n\n${filesTable}`
+        : filesTable;
+    return `${summary}${regressionsBlock}\n\n${overallTable}\n\n${tables}`;
+}
+function renderSummary(project, emoji) {
+    const regressions = project.regressions ?? [];
+    const noBaseline = project.hasBaseline === false;
+    // Informational: overall coverage decreased meaningfully but the gate
+    // is configured not to block on overall-drop. We still surface it so
+    // reviewers know to look — they just won't be forced to block merge
+    // on a number that can swing for reasons outside this PR.
+    const overallDropInfo = project.overallDrop !== undefined &&
+        project.overallDrop > 0.5 &&
+        !regressions.some(r => r.type === 'overall-drop');
+    let regressionLine = '';
+    if (regressions.length === 0) {
+        regressionLine = `${emoji.pass} **No coverage regression detected for changed files.**`;
+    }
+    else {
+        const newUncovered = regressions.filter(r => r.type === 'new-uncovered').length;
+        const fileDropped = regressions.filter(r => r.type === 'file-dropped').length;
+        const overallDrop = regressions.filter(r => r.type === 'overall-drop').length;
+        const parts = [];
+        if (newUncovered)
+            parts.push(`${newUncovered} new uncovered file${newUncovered === 1 ? '' : 's'}`);
+        if (fileDropped)
+            parts.push(`${fileDropped} file${fileDropped === 1 ? '' : 's'} with coverage drop`);
+        if (overallDrop)
+            parts.push(`overall coverage drop`);
+        regressionLine = `${emoji.fail} **Coverage regression detected:** ${parts.join(', ')}.`;
+    }
+    const lines = [];
+    if (noBaseline) {
+        lines.push(`⚠️ **Baseline coverage unavailable** — file-drop and overall-drop checks were skipped this run. New uncovered files are still gated below.`);
+    }
+    lines.push(regressionLine);
+    if (overallDropInfo) {
+        lines.push(`ℹ️ Overall project coverage dropped by ${formatCoverage(project.overallDrop ?? 0)} (informational only — overall-drop is not a blocking gate).`);
+    }
+    lines.push('');
+    return lines.join('\n');
+}
+function renderRegressions(project) {
+    if ((project.regressions ?? []).length === 0)
+        return '';
+    const rows = (project.regressions ?? [])
+        .filter(r => r.type !== 'overall-drop')
+        .map(formatRegressionRow)
+        .join('\n');
+    if (!rows)
+        return '';
+    return [
+        '',
+        '#### Files needing attention',
+        '',
+        '| Module | File | Reason | Base | PR | Drop |',
+        '|:-|:-|:-|:-:|:-:|:-:|',
+        rows,
+    ].join('\n');
+}
+function formatRegressionRow(r) {
+    const reason = r.type === 'new-uncovered' ? '🆕 New, no coverage' : '📉 Coverage dropped';
+    const file = r.fileUrl ? `[${r.file}](${r.fileUrl})` : r.file ?? '';
+    const basePct = r.basePercentage !== undefined ? `${formatCoverage(r.basePercentage)}` : 'N/A';
+    const currentPct = formatCoverage(r.currentPercentage);
+    const drop = r.drop !== undefined ? `**\`-${formatCoverage(r.drop)}\`**` : 'N/A';
+    return `| ${r.module} | ${file} | ${reason} | ${basePct} | ${currentPct} | ${drop} |`;
 }
 function getModuleTable(modules, minCoverage, emoji) {
+    // Skip modules with no regressed/new files — keeps the comment focused.
+    const regressedModules = modules.filter(m => m.files.some(f => f.isRegressed ?? f.isNew));
+    if (regressedModules.length === 0)
+        return '';
     const tableHeader = '|Module|Coverage||';
     const tableStructure = '|:-|:-|:-:|';
     let table = `${tableHeader}\n${tableStructure}`;
-    for (const module of modules) {
+    for (const module of regressedModules) {
         const coverageDifference = getCoverageDifference(module.overall, module.changed);
-        renderRow(module.name, module.overall.percentage, coverageDifference, module.changed?.percentage ?? null);
+        const moduleHasRegression = module.files.some(f => f.isRegressed);
+        renderRow(module.name, module.overall.percentage, coverageDifference, module.changed?.percentage ?? null, moduleHasRegression);
     }
     return table;
-    function renderRow(name, overallCoverage, coverageDiff, changedCoverage) {
-        const status = getStatus(changedCoverage, null, minCoverage.changed, emoji);
+    function renderRow(name, overallCoverage, coverageDiff, changedCoverage, regressed) {
+        const status = getStatus(changedCoverage, null, minCoverage.changed, emoji, regressed);
         let coveragePercentage = `${formatCoverage(overallCoverage)}`;
         if (shouldShow(coverageDiff)) {
             coveragePercentage += ` **\`${formatCoverage(coverageDiff)}\`**`;
@@ -689,7 +892,6 @@ function getModuleTable(modules, minCoverage, emoji) {
         table = `${table}\n${row}`;
     }
 }
-// Update getFileTable function in render.ts
 function getFileTable(project, minCoverage, emoji) {
     const tableHeader = project.isMultiModule
         ? '|Module|File|Coverage|Diff||'
@@ -698,32 +900,50 @@ function getFileTable(project, minCoverage, emoji) {
         ? '|:-|:-|:-|:-:|:-:|'
         : '|:-|:-|:-:|:-:|';
     let table = `${tableHeader}\n${tableStructure}`;
+    // When there's no baseline we can't classify files as new/regressed, so
+    // fall back to showing every changed file (informational). Otherwise
+    // filter to only files that need attention.
+    const noBaseline = project.hasBaseline === false;
+    let rowCount = 0;
     for (const module of project.modules) {
-        for (let index = 0; index < module.files.length; index++) {
-            const file = module.files[index];
+        const visibleFiles = noBaseline
+            ? module.files
+            : module.files.filter(f => f.isRegressed ?? f.isNew);
+        if (visibleFiles.length === 0)
+            continue;
+        for (let index = 0; index < visibleFiles.length; index++) {
+            const file = visibleFiles[index];
             let moduleName = module.name;
-            if (index !== 0) {
+            if (index !== 0)
                 moduleName = '';
-            }
-            // Get the base diff from the changed coverage if available
-            const baseDiff = file.changed?.baseDiff !== undefined ?
-                file.changed.baseDiff :
-                (file.basePercentage !== undefined ?
-                    toFloat(file.overall.percentage - file.basePercentage) :
-                    null);
-            renderRow(moduleName, `[${file.name}](${file.url})`, file.overall.percentage, baseDiff, file.changed?.percentage ?? null, project.isMultiModule);
+            const baseDiff = file.changed?.baseDiff !== undefined
+                ? file.changed.baseDiff
+                : (file.basePercentage !== undefined
+                    ? toFloat(file.overall.percentage - file.basePercentage)
+                    : null);
+            const displayName = file.isNew ? `🆕 ${file.name}` : file.name;
+            renderRow(moduleName, `[${displayName}](${file.url})`, file.overall.percentage, baseDiff, file.changed?.percentage ?? null, project.isMultiModule, file.isNew === true, file.isRegressed === true);
+            rowCount++;
         }
     }
+    if (rowCount === 0)
+        return '';
     return project.isMultiModule
-        ? `<details>\n<summary>Files</summary>\n\n${table}\n\n</details>`
+        ? `<details open>\n<summary><b>Files needing attention</b></summary>\n\n${table}\n\n</details>`
         : table;
-    function renderRow(moduleName, fileName, overallCoverage, baseDiff, changedCoverage, isMultiModule) {
-        const status = getStatus(changedCoverage, baseDiff, minCoverage.changed, emoji);
-        let coveragePercentage = `${formatCoverage(overallCoverage)}`;
-        let diffText = 'N/A';
-        if (baseDiff !== null) {
+    function renderRow(moduleName, fileName, overallCoverage, baseDiff, changedCoverage, isMultiModule, isNew, regressed) {
+        const status = getStatus(changedCoverage, baseDiff, minCoverage.changed, emoji, regressed);
+        const coveragePercentage = `${formatCoverage(overallCoverage)}`;
+        let diffText;
+        if (isNew) {
+            diffText = '**`NEW`**';
+        }
+        else if (baseDiff !== null) {
             const sign = baseDiff >= 0 ? '+' : '';
             diffText = `**\`${sign}${formatCoverage(baseDiff)}\`**`;
+        }
+        else {
+            diffText = 'N/A';
         }
         const row = isMultiModule
             ? `|${moduleName}|${fileName}|${coveragePercentage}|${diffText}|${status}|`
@@ -743,13 +963,18 @@ function getCoverageDifference(overall, changed) {
     else
         return null;
 }
-function getOverallTable(overall, changed, minCoverage, emoji) {
-    const overallStatus = getStatus(overall.percentage, null, // Add null for baseDiff
-    minCoverage.overall, emoji);
-    const coverageDifference = getCoverageDifference(overall, changed);
+function getOverallTable(overall, changed, minCoverage, emoji, baseOverallPercentage, overallDrop, projectHasRegression = false) {
+    const overallStatus = getStatus(overall.percentage, null, minCoverage.overall, emoji, projectHasRegression);
     let coveragePercentage = `${formatCoverage(overall.percentage)}`;
-    if (shouldShow(coverageDifference)) {
-        coveragePercentage += ` **\`${formatCoverage(coverageDifference)}\`**`;
+    if (baseOverallPercentage !== undefined && overallDrop !== undefined && overallDrop !== 0) {
+        const sign = overallDrop > 0 ? '-' : '+';
+        coveragePercentage += ` **\`${sign}${formatCoverage(Math.abs(overallDrop))}\`** (base ${formatCoverage(baseOverallPercentage)})`;
+    }
+    else {
+        const coverageDifference = getCoverageDifference(overall, changed);
+        if (shouldShow(coverageDifference)) {
+            coveragePercentage += ` **\`${formatCoverage(coverageDifference)}\`**`;
+        }
     }
     const tableHeader = `|Overall Project|${coveragePercentage}|${overallStatus}|`;
     const tableStructure = '|:-|:-|:-:|';
@@ -759,10 +984,10 @@ function getOverallTable(overall, changed, minCoverage, emoji) {
     let changedCoverageRow = '';
     if (totalChangedLines !== 0) {
         const changedLinesPercentage = (coveredLines / totalChangedLines) * 100;
-        const filesChangedStatus = getStatus(changedLinesPercentage, null, minCoverage.changed, emoji);
+        const filesChangedStatus = getStatus(changedLinesPercentage, null, minCoverage.changed, emoji, projectHasRegression);
         changedCoverageRow =
             '\n' +
-                `|Files changed|${formatCoverage(changedLinesPercentage)}|${filesChangedStatus}|` +
+                `|Files changed (diff coverage)|${formatCoverage(changedLinesPercentage)}|${filesChangedStatus}|` +
                 '\n<br>';
     }
     return `${tableHeader}\n${tableStructure}${changedCoverageRow}`;
@@ -785,17 +1010,18 @@ function getTitle(title) {
         return '';
     }
 }
-function getStatus(coverage, baseDiff, minCoverage, emoji) {
-    // Default status is pass
+function getStatus(coverage, baseDiff, minCoverage, emoji, regressed = false) {
+    // If our gate says this row is a regression, force fail regardless of
+    // the coverage/threshold heuristics — those don't know about
+    // new-uncovered/file-dropped regressions and would otherwise show 🟢
+    // on a row the gate just failed on.
+    if (regressed)
+        return emoji.fail;
     let status = emoji.pass;
-    // If we have a base diff, check if it's negative
     if (baseDiff !== null) {
-        // If coverage decreased, fail
-        if (baseDiff < 0) {
+        if (baseDiff < 0)
             status = emoji.fail;
-        }
     }
-    // If no base diff or null, fall back to checking against threshold
     else if (coverage !== null && coverage < minCoverage) {
         status = emoji.fail;
     }
@@ -808,6 +1034,35 @@ function formatCoverage(coverage) {
 }
 function toFloat(value) {
     return parseFloat(value.toFixed(2));
+}
+function getRegressionReviewBody(project) {
+    const lines = [];
+    lines.push('### ❌ Coverage gate failed');
+    lines.push('');
+    const newUncovered = (project.regressions ?? []).filter(r => r.type === 'new-uncovered');
+    const fileDropped = (project.regressions ?? []).filter(r => r.type === 'file-dropped');
+    const overall = (project.regressions ?? []).find(r => r.type === 'overall-drop');
+    if (newUncovered.length) {
+        lines.push(`**${newUncovered.length} new file${newUncovered.length === 1 ? '' : 's'} added without test coverage:**`);
+        for (const r of newUncovered) {
+            lines.push(`- \`${r.module}\` / \`${r.file}\``);
+        }
+        lines.push('');
+    }
+    if (fileDropped.length) {
+        lines.push(`**${fileDropped.length} file${fileDropped.length === 1 ? '' : 's'} regressed:**`);
+        for (const r of fileDropped) {
+            const drop = r.drop !== undefined ? ` (-${formatCoverage(r.drop)})` : '';
+            lines.push(`- \`${r.module}\` / \`${r.file}\`${drop}`);
+        }
+        lines.push('');
+    }
+    if (overall) {
+        lines.push(`**Overall coverage dropped by ${formatCoverage(overall.drop)}** (base ${formatCoverage(overall.basePercentage)} → PR ${formatCoverage(overall.currentPercentage)})`);
+        lines.push('');
+    }
+    lines.push('Please add tests for the affected files and push again.');
+    return lines.join('\n');
 }
 
 
@@ -1009,7 +1264,7 @@ async function parseBaseReport(basePath, debugMode) {
     const baseCoverageMap = new Map();
     if (!basePath) {
         core.info('No base coverage path provided, skipping base comparison');
-        return baseCoverageMap;
+        return { files: baseCoverageMap, overall: null };
     }
     try {
         const reportXml = await fs.promises.readFile(basePath.trim(), 'utf-8');
@@ -1017,7 +1272,7 @@ async function parseBaseReport(basePath, debugMode) {
         if (debugMode)
             core.info(`Successfully parsed base report`);
         // Get all packages from the report
-        const packages = report.package || [];
+        const packages = report.package ?? [];
         // Also check packages in groups
         if (report.group) {
             for (const group of report.group) {
@@ -1043,13 +1298,26 @@ async function parseBaseReport(basePath, debugMode) {
                 baseCoverageMap.set(altKey, coverage); // Add alternative lookup by filename only
             }
         }
-        if (debugMode)
+        // Capture project-level overall coverage from base
+        const rootCounters = report.counter ?? [];
+        const baseInstr = rootCounters.find(c => c.type === 'INSTRUCTION');
+        const overall = baseInstr
+            ? {
+                missed: baseInstr.missed,
+                covered: baseInstr.covered,
+                percentage: (0, process_1.calculatePercentage)(baseInstr.covered, baseInstr.missed) ?? 0,
+            }
+            : null;
+        if (debugMode) {
             core.info(`Total files in base coverage map: ${baseCoverageMap.size}`);
-        return baseCoverageMap;
+            if (overall)
+                core.info(`Base overall coverage: ${overall.percentage}%`);
+        }
+        return { files: baseCoverageMap, overall };
     }
     catch (error) {
         core.warning(`Error processing base coverage: ${error}`);
-        return baseCoverageMap;
+        return { files: baseCoverageMap, overall: null };
     }
 }
 

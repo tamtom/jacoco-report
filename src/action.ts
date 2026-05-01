@@ -5,9 +5,9 @@ import * as fs from 'fs'
 import {parseBooleans} from 'xml2js/lib/processors'
 import * as glob from '@actions/glob'
 import {getProjectCoverage} from './process'
-import {getPRComment, getTitle} from './render'
+import {getPRComment, getTitle, COMMENT_MARKER, getRegressionReviewBody} from './render'
 import {debug, getChangedLines, parseToReport} from './util'
-import {Project} from './models/project'
+import {Project, RegressionThresholds} from './models/project'
 import {ChangedFile} from './models/github'
 import {Report} from './models/jacoco-types'
 import {GitHub} from '@actions/github/lib/utils'
@@ -38,14 +38,6 @@ export async function action(): Promise<void> {
       core.getInput('min-coverage-changed-files')
     )
     const title = core.getInput('title')
-    const updateComment = parseBooleans(core.getInput('update-comment'))
-    if (updateComment) {
-      if (!title) {
-        core.info(
-          "'title' is not set. 'update-comment' does not work without 'title'"
-        )
-      }
-    }
     const skipIfNoChanges = parseBooleans(core.getInput('skip-if-no-changes'))
     const passEmoji = core.getInput('pass-emoji')
     const failEmoji = core.getInput('fail-emoji')
@@ -53,17 +45,29 @@ export async function action(): Promise<void> {
     continueOnError = parseBooleans(core.getInput('continue-on-error'))
     const debugMode = parseBooleans(core.getInput('debug-mode'))
 
-    const event = github.context.eventName
-    core.info(`Event is ${event}`)
-    if (debugMode) {
-      core.info(`passEmoji: ${passEmoji}`)
-      core.info(`failEmoji: ${failEmoji}`)
+    // Regression gating thresholds
+    const maxOverallDrop = parseFloat(core.getInput('max-overall-drop') || '1.0')
+    const maxFileDrop = parseFloat(core.getInput('max-file-drop') || '1.0')
+    const failOnUncoveredNewFile = parseBooleans(
+      core.getInput('fail-on-uncovered-new-file') || 'true'
+    )
+    const failOnOverallDrop = parseBooleans(
+      core.getInput('fail-on-overall-drop') || 'false'
+    )
+    const requestChangesOnRegression = parseBooleans(
+      core.getInput('request-changes-on-regression') || 'true'
+    )
+    const thresholds: RegressionThresholds = {
+      fileDrop: maxFileDrop,
+      overallDrop: maxOverallDrop,
+      failOnUncoveredNewFile,
+      failOnOverallDrop,
     }
 
+    const event = github.context.eventName
+    core.info(`Event is ${event}`)
+
     const commentType: string = core.getInput('comment-type')
-    if (debugMode) {
-      core.info(`commentType: ${commentType}`)
-    }
     if (!isValidCommentType(commentType)) {
       core.setFailed(`'comment-type' ${commentType} is invalid`)
     }
@@ -117,24 +121,27 @@ export async function action(): Promise<void> {
     core.info(`head sha: ${head}`)
     if (debugMode) core.info(`reportPaths: ${reportPaths}`)
 
-      const baseCoverage = basePath ? 
-      await parseBaseReport(basePath, debugMode) : 
-      undefined;
-    
-    if (debugMode && baseCoverage) {
-      core.info(`Base coverage map contains ${baseCoverage.size} entries`);
+    const baseReport = basePath
+      ? await parseBaseReport(basePath, debugMode)
+      : { files: undefined, overall: null }
+
+    if (debugMode && baseReport.files) {
+      core.info(`Base coverage map contains ${baseReport.files.size} entries`)
     }
 
+    const changedFiles = await getChangedFiles(client, debugMode)
+    if (debugMode) core.info(`changedFiles: ${debug(changedFiles)}`)
 
-    const changedFiles = await getChangedFiles(base, head, client, debugMode);
-    if (debugMode) core.info(`changedFiles: ${debug(changedFiles)}`);
+    const reports = await getJsonReports(reportPaths, debugMode)
 
-    const reportsJsonAsync = getJsonReports(reportPaths, debugMode);
-    const reports = await reportsJsonAsync;
+    const project = getProjectCoverage(
+      reports,
+      changedFiles,
+      baseReport.files,
+      baseReport.overall,
+      thresholds
+    )
 
-    // Pass baseCoverage to getProjectCoverage
-    const project: Project = getProjectCoverage(reports, changedFiles, baseCoverage);
-    
     if (debugMode) core.info(`project: ${debug(project)}`)
     core.setOutput(
       'coverage-overall',
@@ -144,56 +151,61 @@ export async function action(): Promise<void> {
       'coverage-changed-files',
       parseFloat(project['coverage-changed-files'].toFixed(2))
     )
+    core.setOutput('coverage-regressed', String((project.regressions ?? []).length > 0))
+    core.setOutput(
+      'regression-summary',
+      (project.regressions ?? []).length === 0
+        ? ''
+        : (project.regressions ?? [])
+            .map(r => `${r.type} | ${r.module} | ${r.file ?? ''} | drop=${r.drop ?? 'n/a'}`)
+            .join('\n')
+    )
+
     const skip = skipIfNoChanges && project.modules.length === 0
     if (debugMode) core.info(`skip: ${skip}`)
     if (debugMode) core.info(`prNumber: ${prNumber}`)
     if (!skip) {
-      const emoji = {
-        pass: passEmoji,
-        fail: failEmoji,
-      }
+      const emoji = {pass: passEmoji, fail: failEmoji}
       const titleFormatted = getTitle(title)
       const bodyFormatted = getPRComment(
         project,
-        {
-          overall: minCoverageOverall,
-          changed: minCoverageChangedFiles,
-        },
+        {overall: minCoverageOverall, changed: minCoverageChangedFiles},
         title,
         emoji
       )
       switch (commentType) {
         case 'pr_comment':
-          await addComment(
-            prNumber,
-            updateComment,
-            titleFormatted,
-            bodyFormatted,
-            client,
-            debugMode
-          )
+          await upsertComment(prNumber, titleFormatted, bodyFormatted, client, debugMode)
           break
         case 'summary':
           await addWorkflowSummary(bodyFormatted)
           break
         case 'both':
-          await addComment(
-            prNumber,
-            updateComment,
-            titleFormatted,
-            bodyFormatted,
-            client,
-            debugMode
-          )
+          await upsertComment(prNumber, titleFormatted, bodyFormatted, client, debugMode)
           await addWorkflowSummary(bodyFormatted)
           break
       }
     }
-    
-    // Check for coverage regression AFTER posting the comment
-    if (project.hasCoverageRegression) {
-      core.warning('Code coverage has decreased in one or more files.');
-      core.setFailed('Code coverage regression detected.');
+
+    // Submit / dismiss REQUEST_CHANGES review based on regression state
+    if (requestChangesOnRegression && prNumber !== undefined) {
+      try {
+        if ((project.regressions ?? []).length > 0) {
+          await submitRequestChangesReview(client, prNumber, project, debugMode)
+        } else {
+          await dismissPriorRegressionReviews(client, prNumber, debugMode)
+        }
+      } catch (e) {
+        core.warning(`Could not submit/dismiss review: ${e}`)
+      }
+    }
+
+    if ((project.regressions ?? []).length > 0) {
+      const reasons = (project.regressions ?? [])
+        .map(r => `${r.type}: ${r.module}${r.file ? `/${r.file}` : ''}`)
+        .join('; ')
+      core.warning(`Coverage regression detected. ${reasons}`)
+      core.setFailed(`Coverage regression detected. ${reasons}`)
     }
   } catch (error) {
     if (error instanceof Error) {
@@ -212,7 +224,7 @@ async function getJsonReports(
 ): Promise<Report[]> {
   const globber = await glob.create(xmlPaths.join('\n'))
   const files = await globber.glob()
-  if (debugMode) core.info(`Resolved filesV2: ${files}`)
+  if (debugMode) core.info(`Resolved files: ${files}`)
 
   return Promise.all(
     files.map(async path => {
@@ -221,100 +233,162 @@ async function getJsonReports(
     })
   )
 }
-async function getJsonReport(
-  xmlPath: string,
-  debugMode: boolean
-): Promise<Report> {
-  if (debugMode) core.info(`getJsonReport xmlPath: ${xmlPath}`)
-  const reportXml = await fs.promises.readFile(xmlPath, 'utf-8')
-  return await parseToReport(reportXml)
-}
 
 async function getChangedFiles(
-  base: string,
-  head: string,
   client: InstanceType<typeof GitHub>,
   debugMode: boolean
 ): Promise<ChangedFile[]> {
-  const prNumber = github.context.payload.pull_request?.number;
-  
-  // Check if prNumber exists
+  const prNumber = github.context.payload.pull_request?.number
   if (!prNumber) {
-    core.warning("Pull request number not found. Cannot fetch changed files.");
-    return [];
+    core.warning('Pull request number not found. Cannot fetch changed files.')
+    return []
   }
-  
-  const response = await client.rest.pulls.listFiles({
+
+  // Paginate so PRs with > 30 files don't lose entries.
+  const files = await client.paginate(client.rest.pulls.listFiles, {
     owner: github.context.repo.owner,
     repo: github.context.repo.repo,
     pull_number: prNumber,
-  });
+    per_page: 100,
+  })
 
   const changedFiles: ChangedFile[] = []
-  const files = response.data ?? []
   for (const file of files) {
     if (debugMode) core.info(`file: ${debug(file)}`)
-    const changedFile: ChangedFile = {
+    changedFiles.push({
       filePath: file.filename,
       url: file.blob_url,
       lines: getChangedLines(file.patch),
-    }
-    changedFiles.push(changedFile)
+      status: file.status as ChangedFile['status'],
+      previousFilePath: (file as any).previous_filename,
+    })
   }
   return changedFiles
 }
 
-async function addComment(
+async function upsertComment(
   prNumber: number | undefined,
-  update: boolean,
   title: string,
   body: string,
   client: InstanceType<typeof GitHub>,
   debugMode: boolean
 ): Promise<void> {
   if (prNumber === undefined) {
-    if (debugMode) core.info('prNumber not present')
+    if (debugMode) core.info('prNumber not present, skipping comment')
     return
   }
-  let commentUpdated = false
 
-  if (debugMode) core.info(`update: ${update}`)
-  if (debugMode) core.info(`title: ${title}`)
-  if (debugMode) core.info(`JaCoCo Comment: ${body}`)
-  if (update && title) {
-    if (debugMode) core.info('Listing all comments')
-    const comments = await client.rest.issues.listComments({
-      issue_number: prNumber,
-      ...github.context.repo,
-    })
-    const comment = comments.data.find((it: any) => it.body.startsWith(title))
+  // Paginate ALL issue comments (not just first page) and find ours via the
+  // hidden HTML marker. Title-prefix matching is brittle on long PRs and was
+  // the cause of "comment doesn't update on later commits".
+  const comments = await client.paginate(client.rest.issues.listComments, {
+    owner: github.context.repo.owner,
+    repo: github.context.repo.repo,
+    issue_number: prNumber,
+    per_page: 100,
+  })
 
-    if (comment) {
-      if (debugMode)
-        core.info(
-          `Updating existing comment: id=${comment.id} \n body=${comment.body}`
-        )
-      await client.rest.issues.updateComment({
-        comment_id: comment.id,
-        body,
-        ...github.context.repo,
-      })
-      commentUpdated = true
-    }
-  }
+  const existing = comments.find(
+    (c: any) => typeof c.body === 'string' && c.body.includes(COMMENT_MARKER)
+  )
 
-  if (!commentUpdated) {
-    if (debugMode) core.info('Creating a new comment')
-    await client.rest.issues.createComment({
-      issue_number: prNumber,
+  if (existing) {
+    if (debugMode) core.info(`Updating existing coverage comment id=${existing.id}`)
+    await client.rest.issues.updateComment({
+      owner: github.context.repo.owner,
+      repo: github.context.repo.repo,
+      comment_id: existing.id,
       body,
-      ...github.context.repo,
     })
+    return
   }
+
+  if (debugMode) core.info('Creating new coverage comment')
+  await client.rest.issues.createComment({
+    owner: github.context.repo.owner,
+    repo: github.context.repo.repo,
+    issue_number: prNumber,
+    body,
+  })
 }
 
 async function addWorkflowSummary(body: string): Promise<void> {
   await core.summary.addRaw(body, true).write()
+}
+
+const REVIEW_MARKER = '<!-- jacoco-coverage-review -->'
+
+async function submitRequestChangesReview(
+  client: InstanceType<typeof GitHub>,
+  prNumber: number,
+  project: Project,
+  debugMode: boolean
+): Promise<void> {
+  // Don't stack reviews — if our last bot review already requests changes, refresh its body via comment instead.
+  const reviews = await client.paginate(client.rest.pulls.listReviews, {
+    owner: github.context.repo.owner,
+    repo: github.context.repo.repo,
+    pull_number: prNumber,
+    per_page: 100,
+  })
+
+  const ourReviews = reviews.filter(
+    (r: any) => typeof r.body === 'string' && r.body.includes(REVIEW_MARKER)
+  )
+  const lastOpenChangeRequest = [...ourReviews]
+    .reverse()
+    .find((r: any) => r.state === 'CHANGES_REQUESTED')
+
+  const body = `${REVIEW_MARKER}\n${getRegressionReviewBody(project)}`
+
+  if (lastOpenChangeRequest) {
+    if (debugMode) core.info('Existing CHANGES_REQUESTED review present; not stacking another')
+    return
+  }
+
+  if (debugMode) core.info('Submitting REQUEST_CHANGES review')
+  await client.rest.pulls.createReview({
+    owner: github.context.repo.owner,
+    repo: github.context.repo.repo,
+    pull_number: prNumber,
+    event: 'REQUEST_CHANGES',
+    body,
+  })
+}
+
+async function dismissPriorRegressionReviews(
+  client: InstanceType<typeof GitHub>,
+  prNumber: number,
+  debugMode: boolean
+): Promise<void> {
+  const reviews = await client.paginate(client.rest.pulls.listReviews, {
+    owner: github.context.repo.owner,
+    repo: github.context.repo.repo,
+    pull_number: prNumber,
+    per_page: 100,
+  })
+
+  const ours = reviews.filter(
+    (r: any) =>
+      typeof r.body === 'string' &&
+      r.body.includes(REVIEW_MARKER) &&
+      r.state === 'CHANGES_REQUESTED'
+  )
+
+  for (const r of ours) {
+    if (debugMode) core.info(`Dismissing prior bot review id=${r.id}`)
+    try {
+      await client.rest.pulls.dismissReview({
+        owner: github.context.repo.owner,
+        repo: github.context.repo.repo,
+        pull_number: prNumber,
+        review_id: r.id,
+        message: 'Coverage regression resolved.',
+      })
+    } catch (e) {
+      core.warning(`Failed to dismiss review ${r.id}: ${e}`)
+    }
+  }
 }
 
 type Options = (typeof validCommentTypes)[number]

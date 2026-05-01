@@ -1,7 +1,9 @@
-import {Coverage, Emoji, MinCoverage, Module, Project} from './models/project'
+import {Coverage, Emoji, MinCoverage, Module, Project, Regression} from './models/project'
 
-const coverageAbsent =
-  '> There is no coverage information present for the Files changed'
+export const COMMENT_MARKER = '<!-- jacoco-coverage-comment -->'
+
+const noChangedCoverage =
+  '> No coverage information present for the files changed in this PR.'
 
 export function getPRComment(
   project: Project,
@@ -10,26 +12,110 @@ export function getPRComment(
   emoji: Emoji
 ): string {
   const heading = getTitle(title)
+  const body = renderBody(project, minCoverage, emoji)
+  return `${COMMENT_MARKER}\n${heading}${body}`
+}
+
+function renderBody(
+  project: Project,
+  minCoverage: MinCoverage,
+  emoji: Emoji
+): string {
   if (!project.overall) {
-    return `${heading + coverageAbsent}`
+    return noChangedCoverage
   }
+  const summary = renderSummary(project, emoji)
+  const regressionsBlock = renderRegressions(project)
+  const projectHasRegression = (project.regressions ?? []).length > 0
   const overallTable = getOverallTable(
     project.overall,
     project.changed,
     minCoverage,
-    emoji
+    emoji,
+    project.baseOverallPercentage,
+    project.overallDrop,
+    projectHasRegression
   )
   const moduleTable = getModuleTable(project.modules, minCoverage, emoji)
   const filesTable = getFileTable(project, minCoverage, emoji)
 
-  const tables =
-    project.modules.length === 0
-      ? coverageAbsent
-      : project.isMultiModule
-        ? `${moduleTable}\n\n${filesTable}`
-        : filesTable
+  if (project.modules.length === 0) {
+    return `${summary}\n\n${overallTable}\n\n${noChangedCoverage}`
+  }
 
-  return `${heading + overallTable}\n\n${tables}`
+  const tables = project.isMultiModule
+    ? `${moduleTable}\n\n${filesTable}`
+    : filesTable
+
+  return `${summary}${regressionsBlock}\n\n${overallTable}\n\n${tables}`
+}
+
+function renderSummary(project: Project, emoji: Emoji): string {
+  const regressions = project.regressions ?? []
+  const noBaseline = project.hasBaseline === false
+  // Informational: overall coverage decreased meaningfully but the gate
+  // is configured not to block on overall-drop. We still surface it so
+  // reviewers know to look — they just won't be forced to block merge
+  // on a number that can swing for reasons outside this PR.
+  const overallDropInfo =
+    project.overallDrop !== undefined &&
+    project.overallDrop > 0.5 &&
+    !regressions.some(r => r.type === 'overall-drop')
+
+  let regressionLine = ''
+  if (regressions.length === 0) {
+    regressionLine = `${emoji.pass} **No coverage regression detected for changed files.**`
+  } else {
+    const newUncovered = regressions.filter(r => r.type === 'new-uncovered').length
+    const fileDropped = regressions.filter(r => r.type === 'file-dropped').length
+    const overallDrop = regressions.filter(r => r.type === 'overall-drop').length
+    const parts: string[] = []
+    if (newUncovered) parts.push(`${newUncovered} new uncovered file${newUncovered === 1 ? '' : 's'}`)
+    if (fileDropped) parts.push(`${fileDropped} file${fileDropped === 1 ? '' : 's'} with coverage drop`)
+    if (overallDrop) parts.push(`overall coverage drop`)
+    regressionLine = `${emoji.fail} **Coverage regression detected:** ${parts.join(', ')}.`
+  }
+
+  const lines: string[] = []
+  if (noBaseline) {
+    lines.push(
+      `⚠️ **Baseline coverage unavailable** — file-drop and overall-drop checks were skipped this run. New uncovered files are still gated below.`
+    )
+  }
+  lines.push(regressionLine)
+  if (overallDropInfo) {
+    lines.push(
+      `ℹ️ Overall project coverage dropped by ${formatCoverage(project.overallDrop ?? 0)} (informational only — overall-drop is not a blocking gate).`
+    )
+  }
+  lines.push('')
+  return lines.join('\n')
+}
+
+function renderRegressions(project: Project): string {
+  if ((project.regressions ?? []).length === 0) return ''
+  const rows = (project.regressions ?? [])
+    .filter(r => r.type !== 'overall-drop')
+    .map(formatRegressionRow)
+    .join('\n')
+  if (!rows) return ''
+  return [
+    '',
+    '#### Files needing attention',
+    '',
+    '| Module | File | Reason | Base | PR | Drop |',
+    '|:-|:-|:-|:-:|:-:|:-:|',
+    rows,
+  ].join('\n')
+}
+
+function formatRegressionRow(r: Regression): string {
+  const reason = r.type === 'new-uncovered' ? '🆕 New, no coverage' : '📉 Coverage dropped'
+  const file = r.fileUrl ? `[${r.file}](${r.fileUrl})` : r.file ?? ''
+  const basePct = r.basePercentage !== undefined ? `${formatCoverage(r.basePercentage)}` : 'N/A'
+  const currentPct = formatCoverage(r.currentPercentage)
+  const drop = r.drop !== undefined ? `**\`-${formatCoverage(r.drop)}\`**` : 'N/A'
+  return `| ${r.module} | ${file} | ${reason} | ${basePct} | ${currentPct} | ${drop} |`
 }
 
 function getModuleTable(
@@ -37,19 +123,27 @@ function getModuleTable(
   minCoverage: MinCoverage,
   emoji: Emoji
 ): string {
+  // Skip modules with no regressed/new files — keeps the comment focused.
+  const regressedModules = modules.filter(m =>
+    m.files.some(f => f.isRegressed ?? f.isNew)
+  )
+  if (regressedModules.length === 0) return ''
+
   const tableHeader = '|Module|Coverage||'
   const tableStructure = '|:-|:-|:-:|'
   let table = `${tableHeader}\n${tableStructure}`
-  for (const module of modules) {
+  for (const module of regressedModules) {
     const coverageDifference = getCoverageDifference(
       module.overall,
       module.changed
     )
+    const moduleHasRegression = module.files.some(f => f.isRegressed)
     renderRow(
       module.name,
       module.overall.percentage,
       coverageDifference,
-      module.changed?.percentage ?? null
+      module.changed?.percentage ?? null,
+      moduleHasRegression
     )
   }
   return table
@@ -58,9 +152,10 @@ function getModuleTable(
     name: string,
     overallCoverage: number | null,
     coverageDiff: number | null,
-    changedCoverage: number | null
+    changedCoverage: number | null,
+    regressed: boolean
   ): void {
-    const status = getStatus(changedCoverage, null, minCoverage.changed, emoji)
+    const status = getStatus(changedCoverage, null, minCoverage.changed, emoji, regressed)
     let coveragePercentage = `${formatCoverage(overallCoverage)}`
     if (shouldShow(coverageDiff)) {
       coveragePercentage += ` **\`${formatCoverage(coverageDiff)}\`**`
@@ -70,7 +165,6 @@ function getModuleTable(
   }
 }
 
-// Update getFileTable function in render.ts
 function getFileTable(
   project: Project,
   minCoverage: MinCoverage,
@@ -83,35 +177,48 @@ function getFileTable(
     ? '|:-|:-|:-|:-:|:-:|'
     : '|:-|:-|:-:|:-:|';
   let table = `${tableHeader}\n${tableStructure}`;
-  
+
+  // When there's no baseline we can't classify files as new/regressed, so
+  // fall back to showing every changed file (informational). Otherwise
+  // filter to only files that need attention.
+  const noBaseline = project.hasBaseline === false;
+  let rowCount = 0;
   for (const module of project.modules) {
-    for (let index = 0; index < module.files.length; index++) {
-      const file = module.files[index];
+    const visibleFiles = noBaseline
+      ? module.files
+      : module.files.filter(f => f.isRegressed ?? f.isNew);
+    if (visibleFiles.length === 0) continue;
+
+    for (let index = 0; index < visibleFiles.length; index++) {
+      const file = visibleFiles[index];
       let moduleName = module.name;
-      if (index !== 0) {
-        moduleName = '';
-      }
-      
-      // Get the base diff from the changed coverage if available
-      const baseDiff = file.changed?.baseDiff !== undefined ? 
-        file.changed.baseDiff : 
-        (file.basePercentage !== undefined ? 
-          toFloat(file.overall.percentage - file.basePercentage) : 
-          null);
-      
+      if (index !== 0) moduleName = '';
+
+      const baseDiff = file.changed?.baseDiff !== undefined
+        ? file.changed.baseDiff
+        : (file.basePercentage !== undefined
+          ? toFloat(file.overall.percentage - file.basePercentage)
+          : null);
+
+      const displayName = file.isNew ? `🆕 ${file.name}` : file.name;
       renderRow(
         moduleName,
-        `[${file.name}](${file.url})`,
+        `[${displayName}](${file.url})`,
         file.overall.percentage,
         baseDiff,
         file.changed?.percentage ?? null,
-        project.isMultiModule
+        project.isMultiModule,
+        file.isNew === true,
+        file.isRegressed === true
       );
+      rowCount++;
     }
   }
-  
+
+  if (rowCount === 0) return '';
+
   return project.isMultiModule
-    ? `<details>\n<summary>Files</summary>\n\n${table}\n\n</details>`
+    ? `<details open>\n<summary><b>Files needing attention</b></summary>\n\n${table}\n\n</details>`
     : table;
 
   function renderRow(
@@ -120,24 +227,32 @@ function getFileTable(
     overallCoverage: number | null,
     baseDiff: number | null,
     changedCoverage: number | null,
-    isMultiModule: boolean
+    isMultiModule: boolean,
+    isNew: boolean,
+    regressed: boolean
   ): void {
-const status = getStatus(changedCoverage, baseDiff, minCoverage.changed, emoji);
-    
-    let coveragePercentage = `${formatCoverage(overallCoverage)}`;
-    
-    let diffText = 'N/A';
-    if (baseDiff !== null) {
+    const status = getStatus(changedCoverage, baseDiff, minCoverage.changed, emoji, regressed);
+
+    const coveragePercentage = `${formatCoverage(overallCoverage)}`;
+
+    let diffText: string;
+    if (isNew) {
+      diffText = '**`NEW`**';
+    } else if (baseDiff !== null) {
       const sign = baseDiff >= 0 ? '+' : '';
       diffText = `**\`${sign}${formatCoverage(baseDiff)}\`**`;
+    } else {
+      diffText = 'N/A';
     }
-        const row = isMultiModule
+
+    const row = isMultiModule
       ? `|${moduleName}|${fileName}|${coveragePercentage}|${diffText}|${status}|`
       : `|${fileName}|${coveragePercentage}|${diffText}|${status}|`;
-    
+
     table = `${table}\n${row}`;
   }
 }
+
 function getCoverageDifference(
   overall: Coverage,
   changed: Coverage | null
@@ -155,18 +270,28 @@ function getOverallTable(
   overall: Coverage,
   changed: Coverage | null,
   minCoverage: MinCoverage,
-  emoji: Emoji
+  emoji: Emoji,
+  baseOverallPercentage: number | undefined,
+  overallDrop: number | undefined,
+  projectHasRegression = false
 ): string {
   const overallStatus = getStatus(
     overall.percentage,
-    null, // Add null for baseDiff
+    null,
     minCoverage.overall,
-    emoji
+    emoji,
+    projectHasRegression
   )
-  const coverageDifference = getCoverageDifference(overall, changed)
+
   let coveragePercentage = `${formatCoverage(overall.percentage)}`
-  if (shouldShow(coverageDifference)) {
-    coveragePercentage += ` **\`${formatCoverage(coverageDifference)}\`**`
+  if (baseOverallPercentage !== undefined && overallDrop !== undefined && overallDrop !== 0) {
+    const sign = overallDrop > 0 ? '-' : '+'
+    coveragePercentage += ` **\`${sign}${formatCoverage(Math.abs(overallDrop))}\`** (base ${formatCoverage(baseOverallPercentage)})`
+  } else {
+    const coverageDifference = getCoverageDifference(overall, changed)
+    if (shouldShow(coverageDifference)) {
+      coveragePercentage += ` **\`${formatCoverage(coverageDifference)}\`**`
+    }
   }
   const tableHeader = `|Overall Project|${coveragePercentage}|${overallStatus}|`
   const tableStructure = '|:-|:-|:-:|'
@@ -179,13 +304,14 @@ function getOverallTable(
     const changedLinesPercentage = (coveredLines / totalChangedLines) * 100
     const filesChangedStatus = getStatus(
       changedLinesPercentage,
-      null, 
+      null,
       minCoverage.changed,
-      emoji
+      emoji,
+      projectHasRegression
     )
     changedCoverageRow =
       '\n' +
-      `|Files changed|${formatCoverage(
+      `|Files changed (diff coverage)|${formatCoverage(
         changedLinesPercentage
       )}|${filesChangedStatus}|` +
       '\n<br>'
@@ -216,31 +342,59 @@ function getStatus(
   coverage: number | null,
   baseDiff: number | null,
   minCoverage: number,
-  emoji: Emoji
+  emoji: Emoji,
+  regressed = false
 ): string {
-  // Default status is pass
+  // If our gate says this row is a regression, force fail regardless of
+  // the coverage/threshold heuristics — those don't know about
+  // new-uncovered/file-dropped regressions and would otherwise show 🟢
+  // on a row the gate just failed on.
+  if (regressed) return emoji.fail;
   let status = emoji.pass;
-  
-  // If we have a base diff, check if it's negative
   if (baseDiff !== null) {
-    // If coverage decreased, fail
-    if (baseDiff < 0) {
-      status = emoji.fail;
-    }
-  } 
-  // If no base diff or null, fall back to checking against threshold
-  else if (coverage !== null && coverage < minCoverage) {
+    if (baseDiff < 0) status = emoji.fail;
+  } else if (coverage !== null && coverage < minCoverage) {
     status = emoji.fail;
   }
-  
   return status;
 }
 
-function formatCoverage(coverage: number | null): string {
+function formatCoverage(coverage: number | null | undefined): string {
   if (coverage == null) return 'NaN%'
   return `${toFloat(coverage)}%`
 }
 
 function toFloat(value: number): number {
   return parseFloat(value.toFixed(2))
+}
+
+export function getRegressionReviewBody(project: Project): string {
+  const lines: string[] = []
+  lines.push('### ❌ Coverage gate failed')
+  lines.push('')
+  const newUncovered = (project.regressions ?? []).filter(r => r.type === 'new-uncovered')
+  const fileDropped = (project.regressions ?? []).filter(r => r.type === 'file-dropped')
+  const overall = (project.regressions ?? []).find(r => r.type === 'overall-drop')
+
+  if (newUncovered.length) {
+    lines.push(`**${newUncovered.length} new file${newUncovered.length === 1 ? '' : 's'} added without test coverage:**`)
+    for (const r of newUncovered) {
+      lines.push(`- \`${r.module}\` / \`${r.file}\``)
+    }
+    lines.push('')
+  }
+  if (fileDropped.length) {
+    lines.push(`**${fileDropped.length} file${fileDropped.length === 1 ? '' : 's'} regressed:**`)
+    for (const r of fileDropped) {
+      const drop = r.drop !== undefined ? ` (-${formatCoverage(r.drop)})` : ''
+      lines.push(`- \`${r.module}\` / \`${r.file}\`${drop}`)
+    }
+    lines.push('')
+  }
+  if (overall) {
+    lines.push(`**Overall coverage dropped by ${formatCoverage(overall.drop)}** (base ${formatCoverage(overall.basePercentage)} → PR ${formatCoverage(overall.currentPercentage)})`)
+    lines.push('')
+  }
+  lines.push('Please add tests for the affected files and push again.')
+  return lines.join('\n')
 }
