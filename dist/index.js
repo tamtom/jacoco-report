@@ -161,13 +161,13 @@ async function action() {
             const bodyFormatted = (0, render_1.getPRComment)(project, { overall: minCoverageOverall, changed: minCoverageChangedFiles }, title, emoji);
             switch (commentType) {
                 case 'pr_comment':
-                    await upsertComment(prNumber, titleFormatted, bodyFormatted, client, debugMode);
+                    await postComment(prNumber, titleFormatted, bodyFormatted, client, debugMode);
                     break;
                 case 'summary':
                     await addWorkflowSummary(bodyFormatted);
                     break;
                 case 'both':
-                    await upsertComment(prNumber, titleFormatted, bodyFormatted, client, debugMode);
+                    await postComment(prNumber, titleFormatted, bodyFormatted, client, debugMode);
                     await addWorkflowSummary(bodyFormatted);
                     break;
             }
@@ -242,35 +242,18 @@ async function getChangedFiles(client, debugMode) {
     }
     return changedFiles;
 }
-async function upsertComment(prNumber, title, body, client, debugMode) {
+async function postComment(prNumber, title, body, client, debugMode) {
     if (prNumber === undefined) {
         if (debugMode)
             core.info('prNumber not present, skipping comment');
         return;
     }
-    // Paginate ALL issue comments (not just first page) and find ours via the
-    // hidden HTML marker. Title-prefix matching is brittle on long PRs and was
-    // the cause of "comment doesn't update on later commits".
-    const comments = await client.paginate(client.rest.issues.listComments, {
-        owner: github.context.repo.owner,
-        repo: github.context.repo.repo,
-        issue_number: prNumber,
-        per_page: 100,
-    });
-    const existing = comments.find((c) => typeof c.body === 'string' && c.body.includes(render_1.COMMENT_MARKER));
-    if (existing) {
-        if (debugMode)
-            core.info(`Updating existing coverage comment id=${existing.id}`);
-        await client.rest.issues.updateComment({
-            owner: github.context.repo.owner,
-            repo: github.context.repo.repo,
-            comment_id: existing.id,
-            body,
-        });
-        return;
-    }
+    // Append-only: every run posts its own comment so the PR timeline shows
+    // the evolution of coverage state across commits. The hidden marker is
+    // retained on the body purely so we can still locate our comments if a
+    // future maintenance task wants to (e.g. cleanup).
     if (debugMode)
-        core.info('Creating new coverage comment');
+        core.info('Posting new coverage comment');
     await client.rest.issues.createComment({
         owner: github.context.repo.owner,
         repo: github.context.repo.repo,
@@ -283,23 +266,12 @@ async function addWorkflowSummary(body) {
 }
 const REVIEW_MARKER = '<!-- jacoco-coverage-review -->';
 async function submitRequestChangesReview(client, prNumber, project, debugMode) {
-    // Don't stack reviews — if our last bot review already requests changes, refresh its body via comment instead.
-    const reviews = await client.paginate(client.rest.pulls.listReviews, {
-        owner: github.context.repo.owner,
-        repo: github.context.repo.repo,
-        pull_number: prNumber,
-        per_page: 100,
-    });
-    const ourReviews = reviews.filter((r) => typeof r.body === 'string' && r.body.includes(REVIEW_MARKER));
-    const lastOpenChangeRequest = [...ourReviews]
-        .reverse()
-        .find((r) => r.state === 'CHANGES_REQUESTED');
+    // Append-only: every regressing run submits its own CHANGES_REQUESTED
+    // review so the PR timeline preserves the per-commit history of what
+    // regressed and when. Cleanup on a clean run happens in
+    // dismissPriorRegressionReviews — dismissed reviews stay visible in the
+    // timeline with their original body intact.
     const body = `${REVIEW_MARKER}\n${(0, render_1.getRegressionReviewBody)(project)}`;
-    if (lastOpenChangeRequest) {
-        if (debugMode)
-            core.info('Existing CHANGES_REQUESTED review present; not stacking another');
-        return;
-    }
     if (debugMode)
         core.info('Submitting REQUEST_CHANGES review');
     await client.rest.pulls.createReview({
@@ -320,6 +292,14 @@ async function dismissPriorRegressionReviews(client, prNumber, debugMode) {
     const ours = reviews.filter((r) => typeof r.body === 'string' &&
         r.body.includes(REVIEW_MARKER) &&
         r.state === 'CHANGES_REQUESTED');
+    // Use the head SHA so the dismissal event in the timeline points at the
+    // commit that cleared the regression — makes the per-commit story
+    // self-explanatory when a reviewer scrolls back through the PR.
+    const headSha = github.context.payload.pull_request?.head?.sha ?? github.context.sha;
+    const shortSha = typeof headSha === 'string' ? headSha.slice(0, 7) : '';
+    const message = shortSha
+        ? `Coverage regression resolved on ${shortSha}.`
+        : 'Coverage regression resolved.';
     for (const r of ours) {
         if (debugMode)
             core.info(`Dismissing prior bot review id=${r.id}`);
@@ -329,7 +309,7 @@ async function dismissPriorRegressionReviews(client, prNumber, debugMode) {
                 repo: github.context.repo.repo,
                 pull_number: prNumber,
                 review_id: r.id,
-                message: 'Coverage regression resolved.',
+                message,
             });
         }
         catch (e) {
